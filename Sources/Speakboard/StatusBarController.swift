@@ -7,13 +7,13 @@ final class StatusBarController {
         if let btn = item.button {
             btn.image = NSImage(
                 systemSymbolName: "doc.on.clipboard",
-                accessibilityDescription: "SpeakboardDemo"
+                accessibilityDescription: "Speakboard"
             )
         }
         let menu = NSMenu()
         menu.addItem(
             NSMenuItem(
-                title: "Quit SpeakboardDemo",
+                title: "Quit Speakboard",
                 action: #selector(NSApplication.terminate(_:)),
                 keyEquivalent: "q"
             )

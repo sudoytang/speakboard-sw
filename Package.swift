@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "SpeakboardDemo",
+    name: "Speakboard",
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(
-            name: "SpeakboardDemo",
-            path: "Sources/SpeakboardDemo",
+            name: "Speakboard",
+            path: "Sources/Speakboard",
             linkerSettings: [
                 // Carbon is needed for RegisterEventHotKey (global hotkey, no Accessibility permission required).
                 .linkedFramework("Carbon"),
