@@ -13,8 +13,19 @@ enum CapsuleState: Equatable {
 //
 // Hosts four sub-views, one per state.  Transitions with a 120 ms cross-fade.
 // The containing window is responsible for sizing itself to match each state.
+//
+// Key-capture:
+//   The window is made key via makeKey() (inside CapsuleWindowController.appear).
+//   CapsuleWindowController.makeWindow() sets this view as the window's first
+//   responder so keyDown fires here.  No CGEventTap, no Input Monitoring needed.
+//     Esc  (53) → onEsc closure  (dismiss)
+//     Enter(36) → onEnter closure (paste + dismiss when result is showing)
 
 final class CapsuleContentView: NSView {
+
+    // Set by CapsuleWindowController after construction.
+    var onEsc:   (() -> Void)?
+    var onEnter: (() -> Void)?
 
     // MARK: - Sub-views
 
@@ -22,6 +33,8 @@ final class CapsuleContentView: NSView {
     private let spinner   = NSProgressIndicator()
     private let textLabel = NSTextField(labelWithString: "")
     private let errorIcon = NSImageView()
+
+    private var currentState: CapsuleState = .recording
 
     // MARK: - Init
 
@@ -31,9 +44,22 @@ final class CapsuleContentView: NSView {
     }
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    // MARK: - Key handling
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 53: onEsc?()               // Escape → dismiss
+        case 36: onEnter?()             // Return / Enter → paste + dismiss
+        default: super.keyDown(with: event)
+        }
+    }
+
     // MARK: - Public
 
     func setState(_ state: CapsuleState, animated: Bool = true) {
+        currentState = state
         if case .result(let t) = state { textLabel.stringValue = t }
         if case .processing = state { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
 

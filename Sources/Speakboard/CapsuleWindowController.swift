@@ -78,9 +78,16 @@ final class CapsuleWindowController: NSObject {
     private func makeWindow() -> NSPanel {
         let initialW = W.recording
 
-        let panel = NSPanel(
+        // KeyablePanel overrides canBecomeKey → true, which is required for any
+        // NSPanel with a non-standard styleMask to accept makeKey() and therefore
+        // receive keyboard events (Enter / Esc) via the normal responder chain.
+        //
+        // .fullSizeContentView keeps the underlying title-bar structure intact
+        // (so canBecomeKey works), while the title bar is hidden visually below.
+        // .nonactivatingPanel ensures the capsule never steals app activation.
+        let panel = KeyablePanel(
             contentRect: NSRect(x: 0, y: 0, width: initialW, height: capsuleH),
-            styleMask:   [.borderless, .nonactivatingPanel],
+            styleMask:   [.fullSizeContentView, .closable, .nonactivatingPanel],
             backing:     .buffered,
             defer:       false
         )
@@ -93,6 +100,13 @@ final class CapsuleWindowController: NSObject {
         panel.hasShadow          = false
         panel.collectionBehavior = [.auxiliary, .stationary, .moveToActiveSpace, .fullScreenAuxiliary]
         panel.isMovableByWindowBackground = true
+        // Visually remove the title bar while keeping the structure that canBecomeKey needs.
+        panel.titleVisibility             = .hidden
+        panel.titlebarAppearsTransparent  = true
+        panel.titlebarSeparatorStyle      = .none
+        panel.standardWindowButton(.closeButton)?.isHidden    = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden     = true
 
         // ── Container (transparent; lets CALayer shadow extend beyond blur view) ──
         let container = NSView(frame: NSRect(x: 0, y: 0, width: initialW, height: capsuleH))
@@ -130,6 +144,10 @@ final class CapsuleWindowController: NSObject {
         blur.addSubview(cv)
         contentView = cv
 
+        // Wire key-event callbacks.
+        cv.onEsc   = { [weak self] in self?.dismissNow() }
+        cv.onEnter = { [weak self] in self?.pasteAndDismiss() }
+
         panel.contentView = container
         return panel
     }
@@ -144,6 +162,10 @@ final class CapsuleWindowController: NSObject {
         window.setFrame(startFrame, display: false)
         window.alphaValue = 0
         window.orderFrontRegardless()
+        // makeKey() lets the panel receive keyboard events without activating
+        // the app, so the previous app stays frontmost (paste targets it).
+        window.makeKey()
+        window.makeFirstResponder(contentView)
         updateShadow(width: width)
 
         // Spring-like entry: slides up + fades in (0.35 s).
@@ -152,6 +174,28 @@ final class CapsuleWindowController: NSObject {
             ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1.05)
             window.animator().setFrame(finalFrame, display: true)
             window.animator().alphaValue = 1
+        }
+    }
+
+    // Called from key-event closures; also cancels the auto-dismiss timer.
+    private func dismissNow() {
+        dismissWork?.cancel()
+        dismissWork = nil
+        dismiss()
+    }
+
+    // Enter in result state: paste the text already on the clipboard, then dismiss.
+    // The previous app is still frontmost (never deactivated), so ⌘V lands there.
+    private func pasteAndDismiss() {
+        dismissNow()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            guard let src = CGEventSource(stateID: .combinedSessionState) else { return }
+            let dn = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)   // V
+            let up = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
+            dn?.flags = .maskCommand
+            up?.flags = .maskCommand
+            dn?.post(tap: .cgSessionEventTap)
+            up?.post(tap: .cgSessionEventTap)
         }
     }
 
@@ -239,4 +283,13 @@ final class CapsuleWindowController: NSObject {
                cornerWidth: rect.height / 2, cornerHeight: rect.height / 2,
                transform: nil)
     }
+}
+
+// MARK: - KeyablePanel
+
+// NSPanel with a non-standard styleMask returns false for canBecomeKey by
+// default, which means makeKey() has no effect and the panel never enters the
+// responder chain.  Overriding to true restores normal key-event delivery.
+private final class KeyablePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
 }

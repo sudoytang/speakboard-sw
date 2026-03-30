@@ -99,7 +99,10 @@ final class SidecarManager {
     func stop() {
         healthTimer?.invalidate()
         healthTimer = nil
-        process?.terminate()
+        if let p = process {
+            p.terminate()
+            p.waitUntilExit()   // block until the backend process actually exits
+        }
         process = nil
         isReady = false
     }
