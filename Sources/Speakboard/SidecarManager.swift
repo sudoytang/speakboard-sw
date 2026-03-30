@@ -9,15 +9,19 @@ enum SidecarError: LocalizedError {
     case httpError(Int)
     case invalidResponse
     case network(Error)
+    case noSpeechDetected       // audio was silent, nothing to transcribe
+    case hallucinationFiltered  // all segments were flagged as hallucinations
 
     var errorDescription: String? {
         switch self {
-        case .uvNotFound:       return "Could not find the 'uv' executable."
-        case .backendNotFound:  return "Could not find the backend directory."
-        case .notReady:         return "Backend is not ready yet."
-        case .httpError(let c): return "Server returned HTTP \(c)."
-        case .invalidResponse:  return "Could not parse transcription response."
-        case .network(let e):   return e.localizedDescription
+        case .uvNotFound:            return "Could not find the 'uv' executable."
+        case .backendNotFound:       return "Could not find the backend directory."
+        case .notReady:              return "Backend is not ready yet."
+        case .httpError(let c):      return "Server returned HTTP \(c)."
+        case .invalidResponse:       return "Could not parse transcription response."
+        case .network(let e):        return e.localizedDescription
+        case .noSpeechDetected:      return "（未检测到语音）"
+        case .hallucinationFiltered: return "（幻觉检测：内容已过滤）"
         }
     }
 }
@@ -147,13 +151,13 @@ final class SidecarManager {
                 return
             }
             // API v2: top-level `text` is empty when all segments were hallucinated
-            // or the audio was silent.  Distinguish the two cases via segments[].hallucinated
-            // so the UI can show a meaningful message instead of an empty label.
+            // or the audio was silent.  Return .failure so the caller can display a
+            // message without treating the placeholder as pasteable text.
             if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let segments = json["segments"] as? [[String: Any]] ?? []
                 let anyHallucinated = segments.contains { $0["hallucinated"] as? Bool == true }
-                let msg = anyHallucinated ? "（幻觉检测：内容已过滤）" : "（未检测到语音）"
-                completion(.success(msg))
+                let e: SidecarError = anyHallucinated ? .hallucinationFiltered : .noSpeechDetected
+                completion(.failure(e))
                 return
             }
             completion(.success(text))

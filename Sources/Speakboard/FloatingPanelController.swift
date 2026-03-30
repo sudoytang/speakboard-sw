@@ -3,11 +3,18 @@ import AppKit
 final class FloatingPanelController: NSObject {
 
     // The text written to the clipboard and pasted on Enter.
-    // Updated by PanelContentView after a successful transcription.
-    var pasteText = "Hello world"
+    // nil means there is no valid text to paste (e.g. no speech detected);
+    // pressing Enter will just close the panel in that case.
+    var pasteText: String? = "Hello world"
 
     // Injected by AppDelegate after both objects are created.
     var sidecar: SidecarManager?
+
+    // The transparent border around the blur view gives the system shadow room to
+    // render and lets the window server see the rounded opaque shape, so hasShadow=true
+    // produces a correctly rounded drop shadow without any manual CALayer shadow.
+    private let shadowPad: CGFloat = 18
+    private let cornerRad: CGFloat = 12
 
     private lazy var window: NSPanel = makePanel()
     private weak var contentView: PanelContentView?
@@ -20,6 +27,7 @@ final class FloatingPanelController: NSObject {
         centerOnMouseScreen()
 
         window.orderFrontRegardless()
+        window.invalidateShadow()   // recompute shadow from the composited alpha shape
         window.makeKey()
         if let cv = contentView {
             window.makeFirstResponder(cv)
@@ -55,27 +63,21 @@ final class FloatingPanelController: NSObject {
 
     // MARK: - Recording → transcription (called on A key)
 
-    /// Stop recording, send the audio to the backend, and call completion with
-    /// the transcript text (or nil on failure).  Runs completion on the main thread.
-    func stopAndTranscribe(completion: @escaping (String?) -> Void) {
+    /// Stop recording, send audio to the backend, and call completion with the
+    /// full Result on the main thread.  .success(text) = real transcript to paste;
+    /// .failure = no valid text (caller should display the error message, not paste).
+    func stopAndTranscribe(completion: @escaping (Result<String, Error>) -> Void) {
         guard let audioData = recorder.stopRecording() else {
-            completion(nil)
+            completion(.failure(SidecarError.notReady))
             return
         }
         guard let sidecar else {
             print("[panel] sidecar not set")
-            completion(nil)
+            completion(.failure(SidecarError.notReady))
             return
         }
         sidecar.transcribe(audioData: audioData) { result in
-            DispatchQueue.main.async {
-                switch result {
-                case .success(let text): completion(text)
-                case .failure(let err):
-                    print("[panel] transcription failed: \(err.localizedDescription)")
-                    completion(nil)
-                }
-            }
+            DispatchQueue.main.async { completion(result) }
         }
     }
 
@@ -88,9 +90,13 @@ final class FloatingPanelController: NSObject {
     /// Step 3 requires Accessibility permission.
     /// If paste doesn't work: System Settings → Privacy & Security → Accessibility → add this app.
     func performPasteAction() {
+        guard let text = pasteText else {
+            hide()   // no valid text — just close, don't touch the clipboard
+            return
+        }
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.setString(pasteText, forType: .string)
+        pb.setString(text, forType: .string)
         hide()
         // The original app was never deactivated, so we paste immediately.
         simulateCmdV()
@@ -99,8 +105,13 @@ final class FloatingPanelController: NSObject {
     // MARK: - Private
 
     private func makePanel() -> NSPanel {
+        let contentW: CGFloat = 340
+        let contentH: CGFloat = 130
+        let totalW = contentW + 2 * shadowPad
+        let totalH = contentH + 2 * shadowPad
+
         let panel = KeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 340, height: 130),
+            contentRect: NSRect(x: 0, y: 0, width: totalW, height: totalH),
             // .fullSizeContentView keeps the titled-window structure so that
             // canBecomeKey works correctly; the title bar is hidden visually below.
             // .nonactivatingPanel ensures showing the panel does not steal app activation.
@@ -114,6 +125,9 @@ final class FloatingPanelController: NSObject {
         panel.hidesOnDeactivate = false
         panel.backgroundColor = .clear
         panel.isOpaque = false
+        // hasShadow = true works correctly here: container is fully transparent and
+        // blur is inset by shadowPad, so the window server sees only the rounded
+        // opaque region and draws the system shadow to match it exactly.
         panel.hasShadow = true
         // Visually remove the title bar while keeping the underlying structure intact.
         panel.titleVisibility = .hidden
@@ -125,13 +139,30 @@ final class FloatingPanelController: NSObject {
         // Built-in drag support: clicking the background drags the window.
         panel.isMovableByWindowBackground = true
 
+        // Transparent container fills the full window frame (including shadow padding).
+        // Its transparency lets the window server see only the inset blur view as
+        // the opaque region, so the system drop shadow follows the rounded shape.
+        let container = NSView()
+        container.wantsLayer = true
+        container.autoresizingMask = [.width, .height]
+
+        // NSVisualEffectView clipped to rounded corners, inset from the window edge
+        // by shadowPad so the shadow has room to render within the window bounds.
         let blur = NSVisualEffectView()
+        blur.translatesAutoresizingMaskIntoConstraints = false
         blur.material = .popover
         blur.blendingMode = .behindWindow
         blur.state = .active
         blur.wantsLayer = true
-        blur.layer?.cornerRadius = 12
+        blur.layer?.cornerRadius = cornerRad
         blur.layer?.masksToBounds = true
+        container.addSubview(blur)
+        NSLayoutConstraint.activate([
+            blur.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: shadowPad),
+            blur.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -shadowPad),
+            blur.topAnchor.constraint(equalTo: container.topAnchor, constant: shadowPad),
+            blur.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -shadowPad),
+        ])
 
         let cv = PanelContentView(controller: self)
         cv.translatesAutoresizingMaskIntoConstraints = false
@@ -144,9 +175,33 @@ final class FloatingPanelController: NSObject {
         ])
 
         contentView = cv
-        panel.contentView = blur
+        panel.contentView = container
         panel.initialFirstResponder = cv
         return panel
+    }
+
+    /// Resize the visible content area (blur view) to the given size and animate
+    /// the window frame to match. Called from PanelContentView.
+    func resizeContent(toWidth contentW: CGFloat, height contentH: CGFloat) {
+        let winW = contentW + 2 * shadowPad
+        let winH = contentH + 2 * shadowPad
+
+        let cur = window.frame
+        guard abs(cur.width - winW) > 1 || abs(cur.height - winH) > 1 else { return }
+
+        let newOriginX = cur.midX - winW / 2
+        let newOriginY = cur.midY - winH / 2
+        let newFrame = NSRect(x: newOriginX, y: newOriginY, width: winW, height: winH)
+
+        if window.isVisible {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                window.animator().setFrame(newFrame, display: true)
+            }
+        } else {
+            window.setFrame(newFrame, display: false)
+        }
     }
 
     private func simulateCmdV() {

@@ -28,7 +28,7 @@ final class PanelContentView: NSView {
     override var acceptsFirstResponder: Bool { true }
 
     func reset() {
-        updateLabel(controller?.pasteText ?? "Hello world")
+        updateLabel(controller?.pasteText ?? "Hello world")   // pasteText is "Hello world" at show() time
     }
 
     override func keyDown(with event: NSEvent) {
@@ -39,11 +39,18 @@ final class PanelContentView: NSView {
             controller?.hide()
         case 0:  // A — stop recording, send to backend, update label with transcript
             updateLabel("…")
-            controller?.stopAndTranscribe { [weak self] text in
+            controller?.stopAndTranscribe { [weak self] result in
                 guard let self else { return }
-                let result = text ?? "（transcription failed）"
-                self.controller?.pasteText = result
-                self.updateLabel(result)
+                switch result {
+                case .success(let text):
+                    // Real transcription: store for pasting and display it.
+                    self.controller?.pasteText = text
+                    self.updateLabel(text)
+                case .failure(let error):
+                    // No usable text: show a status message but block pasting.
+                    self.controller?.pasteText = nil
+                    self.updateLabel((error as? SidecarError)?.errorDescription ?? "（转录失败）")
+                }
             }
         default:
             super.keyDown(with: event)
@@ -59,20 +66,20 @@ final class PanelContentView: NSView {
     //   top pad(20) + label-hint gap(8) + hint(~17) + hint-btn gap(8) + button(~28) + bottom pad(16) ≈ 97
     private let vOverhead: CGFloat = 110
 
-    /// Update the label text and animate the window to fit (width + height).
+    /// Update the label text and ask the controller to resize the window to fit.
+    /// newWidth / newHeight here are CONTENT sizes (blur view), not window frame sizes.
+    /// FloatingPanelController.resizeContent(toWidth:height:) adds shadow padding.
     private func updateLabel(_ text: String) {
         label.stringValue = text
-
-        guard let w = window else { return }
 
         let font = label.font ?? .systemFont(ofSize: 28, weight: .medium)
         let attrs: [NSAttributedString.Key: Any] = [.font: font]
 
-        // 1. Determine the ideal width (single-line capped at maxWidth).
+        // 1. Determine the ideal content width (single-line capped at maxWidth).
         let singleLineW = ceil((text as NSString).size(withAttributes: attrs).width) + hPad
         let newWidth = max(minWidth, min(maxWidth, singleLineW))
 
-        // 2. Measure the text height at that width (handles both 1- and N-line text).
+        // 2. Measure the text height at that content width (handles 1- and N-line text).
         let textAreaW = newWidth - hPad
         let measured = (text as NSString).boundingRect(
             with: NSSize(width: textAreaW, height: .greatestFiniteMagnitude),
@@ -84,18 +91,8 @@ final class PanelContentView: NSView {
         // 3. Tell the label its wrapping width so Auto Layout agrees with our measurement.
         label.preferredMaxLayoutWidth = textAreaW
 
-        let cur = w.frame
-        guard abs(cur.width - newWidth) > 1 || abs(cur.height - newHeight) > 1 else { return }
-
-        // 4. Animate resize keeping the window centred on screen.
-        let newOriginX = cur.midX - newWidth  / 2
-        let newOriginY = cur.midY - newHeight / 2
-        let newFrame = NSRect(x: newOriginX, y: newOriginY, width: newWidth, height: newHeight)
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            w.animator().setFrame(newFrame, display: true)
-        }
+        // 4. Delegate window resize + shadow update to the controller.
+        controller?.resizeContent(toWidth: newWidth, height: newHeight)
     }
 
     // MARK: - Layout
