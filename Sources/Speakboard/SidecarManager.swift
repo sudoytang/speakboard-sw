@@ -146,6 +146,16 @@ final class SidecarManager {
                 completion(.failure(SidecarError.invalidResponse))
                 return
             }
+            // API v2: top-level `text` is empty when all segments were hallucinated
+            // or the audio was silent.  Distinguish the two cases via segments[].hallucinated
+            // so the UI can show a meaningful message instead of an empty label.
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let segments = json["segments"] as? [[String: Any]] ?? []
+                let anyHallucinated = segments.contains { $0["hallucinated"] as? Bool == true }
+                let msg = anyHallucinated ? "（幻觉检测：内容已过滤）" : "（未检测到语音）"
+                completion(.success(msg))
+                return
+            }
             completion(.success(text))
         }.resume()
     }
