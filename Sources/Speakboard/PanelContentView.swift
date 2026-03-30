@@ -52,23 +52,45 @@ final class PanelContentView: NSView {
 
     // MARK: - Label + window resize
 
-    /// Update the label text and animate the window width to fit.
+    private let hPad: CGFloat  = 96    // total horizontal padding (48 pt each side)
+    private let maxWidth: CGFloat = 640
+    private let minWidth: CGFloat = 260
+    // Space taken up by everything except the label:
+    //   top pad(20) + label-hint gap(8) + hint(~17) + hint-btn gap(8) + button(~28) + bottom pad(16) ≈ 97
+    private let vOverhead: CGFloat = 110
+
+    /// Update the label text and animate the window to fit (width + height).
     private func updateLabel(_ text: String) {
         label.stringValue = text
 
         guard let w = window else { return }
 
-        // Measure how wide the label wants to be at the current font.
-        let attrs: [NSAttributedString.Key: Any] = [.font: label.font as Any]
-        let textWidth = (text as NSString).size(withAttributes: attrs).width
-        let newWidth = max(260, min(700, ceil(textWidth) + 96))  // 48 pt padding each side
+        let font = label.font ?? .systemFont(ofSize: 28, weight: .medium)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+
+        // 1. Determine the ideal width (single-line capped at maxWidth).
+        let singleLineW = ceil((text as NSString).size(withAttributes: attrs).width) + hPad
+        let newWidth = max(minWidth, min(maxWidth, singleLineW))
+
+        // 2. Measure the text height at that width (handles both 1- and N-line text).
+        let textAreaW = newWidth - hPad
+        let measured = (text as NSString).boundingRect(
+            with: NSSize(width: textAreaW, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attrs
+        )
+        let newHeight = max(130, ceil(measured.height) + vOverhead)
+
+        // 3. Tell the label its wrapping width so Auto Layout agrees with our measurement.
+        label.preferredMaxLayoutWidth = textAreaW
 
         let cur = w.frame
-        guard abs(cur.width - newWidth) > 1 else { return }   // skip if already the right size
+        guard abs(cur.width - newWidth) > 1 || abs(cur.height - newHeight) > 1 else { return }
 
-        // Animate width change while keeping the window horizontally centred.
-        let newOriginX = cur.midX - newWidth / 2
-        let newFrame = NSRect(x: newOriginX, y: cur.minY, width: newWidth, height: cur.height)
+        // 4. Animate resize keeping the window centred on screen.
+        let newOriginX = cur.midX - newWidth  / 2
+        let newOriginY = cur.midY - newHeight / 2
+        let newFrame = NSRect(x: newOriginX, y: newOriginY, width: newWidth, height: newHeight)
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.18
             ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
@@ -83,6 +105,8 @@ final class PanelContentView: NSView {
         label.font = .systemFont(ofSize: 28, weight: .medium)
         label.textColor = .labelColor
         label.alignment = .center
+        label.maximumNumberOfLines = 0          // allow wrapping
+        label.lineBreakMode = .byWordWrapping
         label.translatesAutoresizingMaskIntoConstraints = false
 
         let hint = NSTextField(labelWithString: "↩  paste & close     Esc  close")
@@ -99,11 +123,13 @@ final class PanelContentView: NSView {
         addSubview(hint)
         addSubview(btn)
 
+        // Top-down layout so the window height can grow with the label.
         NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: centerXAnchor),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -14),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 20),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: hPad / 2),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -(hPad / 2)),
 
-            hint.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 6),
+            hint.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 8),
             hint.centerXAnchor.constraint(equalTo: centerXAnchor),
 
             btn.topAnchor.constraint(equalTo: hint.bottomAnchor, constant: 8),
