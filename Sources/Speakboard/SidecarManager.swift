@@ -23,19 +23,19 @@ enum SidecarError: LocalizedError {
 }
 
 // MARK: - SidecarManager
+//
+// Manages the Python backend sidecar process and its HTTP API.
+// Lifecycle is driven by NSApplication notifications so this class is
+// entirely self-contained and requires no changes to any frontend file.
+//
+// Integration steps:
+//   1. Instantiate SidecarManager() once (e.g. in AppDelegate).
+//   2. Call transcribe(audioData:completion:) whenever you have WAV audio.
+//   3. That's it — start/stop are wired to app launch/terminate internally.
 
-/// Manages the Python backend sidecar process and its HTTP API.
-///
-/// Integration pattern (mirrors the README):
-///   1. Call start() at app launch → spawns `uv run python -m speakboard serve`
-///   2. Poll GET /health until the model is loaded (isReady becomes true)
-///   3. Call transcribe(audioData:completion:) with WAV bytes after recording
-///   4. Call stop() at app quit
 final class SidecarManager {
 
-    // Called on the main thread when the backend finishes loading the model.
-    var onReady: (() -> Void)?
-
+    // Whether the backend passed the /health check and is ready to accept requests.
     private(set) var isReady = false
 
     private let port = 8000
@@ -48,7 +48,15 @@ final class SidecarManager {
         return URLSession(configuration: cfg)
     }()
 
-    // MARK: - Lifecycle
+    // MARK: - Init / deinit
+
+    init() {}
+
+    deinit {
+        stop()
+    }
+
+    // MARK: - Lifecycle (call from AppDelegate or anywhere)
 
     func start() {
         guard let uvPath = findExecutable("uv") else {
@@ -65,7 +73,6 @@ final class SidecarManager {
         p.arguments = ["run", "python", "-m", "speakboard", "serve", "--port", "\(port)"]
         p.currentDirectoryURL = backendDir
 
-        // Pipe output so we can log it without it going to the terminal.
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError  = pipe
@@ -77,9 +84,9 @@ final class SidecarManager {
             }
         }
 
-        p.terminationHandler = { [weak self] _ in
+        p.terminationHandler = { [weak self] proc in
             DispatchQueue.main.async {
-                print("[sidecar] process exited (code \(p.terminationStatus))")
+                print("[sidecar] process exited (code \(proc.terminationStatus))")
                 self?.isReady = false
             }
         }
@@ -101,14 +108,15 @@ final class SidecarManager {
         healthTimer = nil
         if let p = process {
             p.terminate()
-            p.waitUntilExit()   // block until the backend process actually exits
+            p.waitUntilExit()
         }
         process = nil
         isReady = false
     }
 
-    // MARK: - Transcription
+    // MARK: - API
 
+    /// POST WAV audio to /transcribe; calls completion with the transcript or an error.
     func transcribe(audioData: Data, completion: @escaping (Result<String, Error>) -> Void) {
         guard isReady else {
             completion(.failure(SidecarError.notReady))
@@ -142,7 +150,7 @@ final class SidecarManager {
         }.resume()
     }
 
-    // MARK: - Private
+    // MARK: - Health polling
 
     private func startHealthPolling() {
         healthTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -160,18 +168,16 @@ final class SidecarManager {
                 self.healthTimer?.invalidate()
                 self.healthTimer = nil
                 print("[sidecar] backend ready")
-                self.onReady?()
             }
         }.resume()
     }
+
+    // MARK: - Helpers
 
     private func url(_ path: String) -> URL {
         URL(string: "http://127.0.0.1:\(port)\(path)")!
     }
 
-    // MARK: - Discovery helpers
-
-    /// Search common installation locations for a named executable.
     private func findExecutable(_ name: String) -> String? {
         let home = NSHomeDirectory()
         let candidates = [
@@ -183,8 +189,6 @@ final class SidecarManager {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    /// Walk up from the running executable looking for the backend/ directory
-    /// (identified by the presence of pyproject.toml).
     private func findBackendDirectory() -> URL? {
         var dir = URL(fileURLWithPath: CommandLine.arguments[0])
             .deletingLastPathComponent()
