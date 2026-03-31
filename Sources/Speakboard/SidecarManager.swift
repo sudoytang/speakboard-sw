@@ -20,8 +20,8 @@ enum SidecarError: LocalizedError {
         case .httpError(let c):      return "Server returned HTTP \(c)."
         case .invalidResponse:       return "Could not parse transcription response."
         case .network(let e):        return e.localizedDescription
-        case .noSpeechDetected:      return "（未检测到语音）"
-        case .hallucinationFiltered: return "（幻觉检测：内容已过滤）"
+        case .noSpeechDetected:      return "No speech detected."
+        case .hallucinationFiltered: return "Audio filtered (hallucination detected)."
         }
     }
 }

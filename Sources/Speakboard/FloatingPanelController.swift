@@ -1,44 +1,208 @@
 import AppKit
 
+// MARK: - State
+
+enum PanelState {
+    enum RecordStyle { case shortPress, longPress }
+    case idle
+    case recording(RecordStyle)  // shortPress: Enter stops; longPress: key release stops
+    case transcribing            // awaiting backend response
+    case result                  // transcript (or error message) ready to paste / dismiss
+}
+
+// MARK: - Controller
+
 final class FloatingPanelController: NSObject {
 
-    // The text written to the clipboard and pasted on Enter.
-    // nil means there is no valid text to paste (e.g. no speech detected);
-    // pressing Enter will just close the panel in that case.
-    var pasteText: String? = "Hello world"
+    // Text written to the clipboard on Enter.  nil means no valid text to paste.
+    var pasteText: String? = nil
 
     // Injected by AppDelegate after both objects are created.
     var sidecar: SidecarManager?
 
-    // The transparent border around the blur view gives the system shadow room to
-    // render and lets the window server see the rounded opaque shape, so hasShadow=true
-    // produces a correctly rounded drop shadow without any manual CALayer shadow.
+    // Exposed read-only so PanelContentView can inspect it in keyDown.
+    private(set) var state: PanelState = .idle
+
+    // Transparent border around the blur view that gives the system shadow room to
+    // render and lets the window server see the rounded opaque shape.
     private let shadowPad: CGFloat = 18
     private let cornerRad: CGFloat = 12
+
+    // A key held longer than this becomes a "long press": release ends recording.
+    // A shorter press becomes a "short press": Enter ends recording.
+    private let holdThreshold: TimeInterval = 0.5
 
     private lazy var window: NSPanel = makePanel()
     private weak var contentView: PanelContentView?
     private let recorder = AudioRecorder()
 
-    // MARK: - Public interface
+    private var pressTime: Date?
+    private var holdWorkItem: DispatchWorkItem?
 
-    func show() {
-        // Position on whichever screen the mouse is currently on.
-        centerOnMouseScreen()
+    // MARK: - Hotkey entry points
 
-        window.orderFrontRegardless()
-        window.invalidateShadow()   // recompute shadow from the composited alpha shape
-        window.makeKey()
-        if let cv = contentView {
-            window.makeFirstResponder(cv)
+    /// Called on hotkey key-down.
+    func hotkeyPressed() {
+        holdWorkItem?.cancel()
+        holdWorkItem = nil
+        pressTime = Date()
+
+        // Discard any in-flight recording from a previous session.
+        _ = recorder.stopRecording()
+
+        if window.isVisible {
+            centerOnMouseScreen()
+        } else {
+            showWindow()
         }
-        // Reset label and paste text to default before each session.
-        pasteText = "Hello world"
-        contentView?.reset()
-        // Start recording immediately; audio is discarded if Esc is pressed.
+
+        pasteText = nil
+        state = .recording(.shortPress)
+        contentView?.enterRecordingState(.shortPress)
+
         recorder.startRecording { error in
             if let error { print("[recorder] \(error.localizedDescription)") }
         }
+
+        // After the hold threshold, upgrade to long-press mode if the recorder is running.
+        let item = DispatchWorkItem { [weak self] in self?.onHoldThresholdReached() }
+        holdWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + holdThreshold, execute: item)
+    }
+
+    /// Called on hotkey key-up.
+    func hotkeyReleased() {
+        holdWorkItem?.cancel()
+        holdWorkItem = nil
+
+        guard case .recording(let style) = state else { return }
+
+        switch style {
+        case .longPress:
+            // Key was held past the threshold: release ends recording.
+            startTranscription()
+        case .shortPress:
+            // Released before the threshold; stay in recording mode.
+            // The user will press Enter to stop recording.
+            break
+        }
+    }
+
+    // MARK: - Transcription
+
+    /// Stop the recorder and send captured audio to the backend.
+    /// Entry points: Enter key (short press) and hotkey release (long press).
+    func startTranscription() {
+        guard case .recording = state else { return }
+
+        state = .transcribing
+        contentView?.enterTranscribingState()
+
+        guard let audioData = recorder.stopRecording() else {
+            finishResult(text: nil, errorMessage: "No audio was captured.")
+            return
+        }
+        guard let sidecar else {
+            finishResult(text: nil, errorMessage: "Backend not connected.")
+            return
+        }
+
+        sidecar.transcribe(audioData: audioData) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, case .transcribing = self.state else { return }
+                switch result {
+                case .success(let text):
+                    self.finishResult(text: text, errorMessage: nil)
+                case .failure(let error):
+                    let msg = (error as? SidecarError)?.errorDescription ?? "Transcription failed."
+                    self.finishResult(text: nil, errorMessage: msg)
+                }
+            }
+        }
+    }
+
+    // MARK: - Paste
+
+    /// Write pasteText to the clipboard and simulate ⌘V.
+    /// If pasteText is nil, just close the panel.
+    func performPasteAction() {
+        guard case .result = state else { return }
+        guard let text = pasteText else { hide(); return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        hide()
+        simulateCmdV()
+    }
+
+    // MARK: - Show / hide
+
+    func hide() {
+        holdWorkItem?.cancel()
+        holdWorkItem = nil
+        _ = recorder.stopRecording()
+        state = .idle
+        window.orderOut(nil)
+    }
+
+    func toggle() {
+        window.isVisible ? hide() : hotkeyPressed()
+    }
+
+    // MARK: - Window resize (called from PanelContentView.updateLabel)
+
+    /// Resize the visible content area (blur view) to the given size and animate
+    /// the window frame to match.
+    func resizeContent(toWidth contentW: CGFloat, height contentH: CGFloat) {
+        let winW = contentW + 2 * shadowPad
+        let winH = contentH + 2 * shadowPad
+
+        let cur = window.frame
+        guard abs(cur.width - winW) > 1 || abs(cur.height - winH) > 1 else { return }
+
+        let newOriginX = cur.midX - winW / 2
+        let newOriginY = cur.midY - winH / 2
+        let newFrame = NSRect(x: newOriginX, y: newOriginY, width: winW, height: winH)
+
+        if window.isVisible {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                window.animator().setFrame(newFrame, display: true)
+            }
+        } else {
+            window.setFrame(newFrame, display: false)
+        }
+    }
+
+    // MARK: - Private helpers
+
+    private func onHoldThresholdReached() {
+        guard case .recording(.shortPress) = state else { return }
+        if recorder.isRecording {
+            state = .recording(.longPress)
+            contentView?.enterRecordingState(.longPress)
+        }
+        // If the recorder has not started yet (mic permission still pending),
+        // stay in shortPress mode so the user can press Enter to finish.
+    }
+
+    private func finishResult(text: String?, errorMessage: String?) {
+        state = .result
+        pasteText = text
+        if let text {
+            contentView?.enterResultState(text: text, pasteable: true)
+        } else {
+            contentView?.enterResultState(text: errorMessage ?? "Transcription failed.", pasteable: false)
+        }
+    }
+
+    private func showWindow() {
+        centerOnMouseScreen()
+        window.orderFrontRegardless()
+        window.invalidateShadow()
+        window.makeKey()
+        if let cv = contentView { window.makeFirstResponder(cv) }
     }
 
     private func centerOnMouseScreen() {
@@ -50,59 +214,7 @@ final class FloatingPanelController: NSObject {
         window.setFrameOrigin(origin)
     }
 
-    /// Hide the panel. Discards any in-progress recording.
-    func hide() {
-        _ = recorder.stopRecording()   // discard audio; no transcription
-        window.orderOut(nil)
-    }
-
-    /// Toggle: repeated ⌘⇧O presses show or hide the panel.
-    func toggle() {
-        window.isVisible ? hide() : show()
-    }
-
-    // MARK: - Recording → transcription (called on A key)
-
-    /// Stop recording, send audio to the backend, and call completion with the
-    /// full Result on the main thread.  .success(text) = real transcript to paste;
-    /// .failure = no valid text (caller should display the error message, not paste).
-    func stopAndTranscribe(completion: @escaping (Result<String, Error>) -> Void) {
-        guard let audioData = recorder.stopRecording() else {
-            completion(.failure(SidecarError.notReady))
-            return
-        }
-        guard let sidecar else {
-            print("[panel] sidecar not set")
-            completion(.failure(SidecarError.notReady))
-            return
-        }
-        sidecar.transcribe(audioData: audioData) { result in
-            DispatchQueue.main.async { completion(result) }
-        }
-    }
-
-    // MARK: - Paste action  (called on Return / Insert button)
-
-    /// 1. Write demoPasteText to the system clipboard.
-    /// 2. Close the panel.
-    /// 3. Simulate ⌘V to paste into the still-active original app.
-    ///
-    /// Step 3 requires Accessibility permission.
-    /// If paste doesn't work: System Settings → Privacy & Security → Accessibility → add this app.
-    func performPasteAction() {
-        guard let text = pasteText else {
-            hide()   // no valid text — just close, don't touch the clipboard
-            return
-        }
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(text, forType: .string)
-        hide()
-        // The original app was never deactivated, so we paste immediately.
-        simulateCmdV()
-    }
-
-    // MARK: - Private
+    // MARK: - Panel construction
 
     private func makePanel() -> NSPanel {
         let contentW: CGFloat = 340
@@ -125,9 +237,9 @@ final class FloatingPanelController: NSObject {
         panel.hidesOnDeactivate = false
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        // hasShadow = true works correctly here: container is fully transparent and
-        // blur is inset by shadowPad, so the window server sees only the rounded
-        // opaque region and draws the system shadow to match it exactly.
+        // hasShadow = true works here: the container is fully transparent and the
+        // blur view is inset by shadowPad, so the window server sees only the
+        // rounded opaque region and draws the system shadow to match it exactly.
         panel.hasShadow = true
         // Visually remove the title bar while keeping the underlying structure intact.
         panel.titleVisibility = .hidden
@@ -136,7 +248,6 @@ final class FloatingPanelController: NSObject {
         panel.standardWindowButton(.closeButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
-        // Built-in drag support: clicking the background drags the window.
         panel.isMovableByWindowBackground = true
 
         // Transparent container fills the full window frame (including shadow padding).
@@ -180,33 +291,10 @@ final class FloatingPanelController: NSObject {
         return panel
     }
 
-    /// Resize the visible content area (blur view) to the given size and animate
-    /// the window frame to match. Called from PanelContentView.
-    func resizeContent(toWidth contentW: CGFloat, height contentH: CGFloat) {
-        let winW = contentW + 2 * shadowPad
-        let winH = contentH + 2 * shadowPad
-
-        let cur = window.frame
-        guard abs(cur.width - winW) > 1 || abs(cur.height - winH) > 1 else { return }
-
-        let newOriginX = cur.midX - winW / 2
-        let newOriginY = cur.midY - winH / 2
-        let newFrame = NSRect(x: newOriginX, y: newOriginY, width: winW, height: winH)
-
-        if window.isVisible {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.18
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                window.animator().setFrame(newFrame, display: true)
-            }
-        } else {
-            window.setFrame(newFrame, display: false)
-        }
-    }
-
     private func simulateCmdV() {
         // CGEvent.post requires Accessibility permission.
         // On first run the system will show a permission dialog automatically.
+        // If paste does not work: System Settings → Privacy & Security → Accessibility → add this app.
         if !AXIsProcessTrusted() {
             let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
             AXIsProcessTrustedWithOptions(opts as CFDictionary)

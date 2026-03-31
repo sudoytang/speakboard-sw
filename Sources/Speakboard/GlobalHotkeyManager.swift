@@ -14,8 +14,8 @@ import Carbon
 //   keyCode   – a kVK_* value from <Carbon/HIToolbox/Events.h>
 //   modifiers – combine cmdKey / shiftKey / optionKey / controlKey
 //
-// TOGGLE BEHAVIOUR: repeated ⌘⇧O presses toggle the panel (show ↔ hide).
-// This is implemented in FloatingPanelController.toggle().
+// HOLD BEHAVIOUR: key-down → onPress (show panel + start recording)
+//                 key-up   → onRelease (stop recording + transcribe)
 
 final class GlobalHotkeyManager {
 
@@ -23,12 +23,14 @@ final class GlobalHotkeyManager {
     private let keyCode:   UInt32 = UInt32(kVK_ANSI_O)           // O
     private let modifiers: UInt32 = UInt32(cmdKey | shiftKey)     // ⌘⇧
 
-    private let callback: () -> Void
+    private let onPress:   () -> Void
+    private let onRelease: () -> Void
     private var hotKeyRef:  EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
 
-    init(callback: @escaping () -> Void) {
-        self.callback = callback
+    init(onPress: @escaping () -> Void, onRelease: @escaping () -> Void) {
+        self.onPress   = onPress
+        self.onRelease = onRelease
         install()
     }
 
@@ -40,23 +42,33 @@ final class GlobalHotkeyManager {
     // MARK: - Private
 
     private func install() {
-        var spec = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind:  UInt32(kEventHotKeyPressed)
-        )
+        let specs = [
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)),
+        ]
 
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
 
-        InstallEventHandler(
-            GetApplicationEventTarget(),
-            { (_, _, userData) -> OSStatus in
-                guard let ptr = userData else { return OSStatus(eventNotHandledErr) }
-                let mgr = Unmanaged<GlobalHotkeyManager>.fromOpaque(ptr).takeUnretainedValue()
-                DispatchQueue.main.async { mgr.callback() }
-                return noErr
-            },
-            1, &spec, selfPtr, &handlerRef
-        )
+        _ = specs.withUnsafeBufferPointer { buf in
+            InstallEventHandler(
+                GetApplicationEventTarget(),
+                { (_, event, userData) -> OSStatus in
+                    guard let ptr = userData, let event else {
+                        return OSStatus(eventNotHandledErr)
+                    }
+                    let mgr = Unmanaged<GlobalHotkeyManager>.fromOpaque(ptr).takeUnretainedValue()
+                    switch GetEventKind(event) {
+                    case UInt32(kEventHotKeyPressed):
+                        DispatchQueue.main.async { mgr.onPress() }
+                    case UInt32(kEventHotKeyReleased):
+                        DispatchQueue.main.async { mgr.onRelease() }
+                    default: break
+                    }
+                    return noErr
+                },
+                specs.count, buf.baseAddress, selfPtr, &handlerRef
+            )
+        }
 
         let hotKeyID = EventHotKeyID(signature: fourCharCode("SBDM"), id: 1)
         RegisterEventHotKey(

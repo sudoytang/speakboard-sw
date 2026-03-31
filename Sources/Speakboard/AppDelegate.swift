@@ -9,9 +9,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         panel = FloatingPanelController()
         statusBar = StatusBarController()
-        hotkey = GlobalHotkeyManager { [weak self] in
-            self?.panel.toggle()
-        }
+        hotkey = GlobalHotkeyManager(
+            onPress:   { [weak self] in self?.panel.hotkeyPressed() },
+            onRelease: { [weak self] in self?.panel.hotkeyReleased() }
+        )
         sidecar = SidecarManager()
         sidecar.start()
         panel.sidecar = sidecar
