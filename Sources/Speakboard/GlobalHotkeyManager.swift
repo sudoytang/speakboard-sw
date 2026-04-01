@@ -9,29 +9,25 @@ import Carbon
 // The OS delivers the hotkey event to our app's Carbon event loop even when
 // another application is the frontmost window.
 //
-// CURRENT BINDING: ⌘⇧O
-// To change the shortcut, edit the two constants below:
-//   keyCode   – a kVK_* value from <Carbon/HIToolbox/Events.h>
-//   modifiers – combine cmdKey / shiftKey / optionKey / controlKey
+// The active key binding is read from SettingsStore at init time and can be
+// updated at runtime via update(keyCode:modifiers:).
 //
 // HOLD BEHAVIOUR: key-down → onPress (show panel + start recording)
 //                 key-up   → onRelease (stop recording + transcribe)
 
 final class GlobalHotkeyManager {
 
-    // MARK: - Shortcut constants  (edit here to remap)
-    private let keyCode:   UInt32 = UInt32(kVK_ANSI_O)           // O
-    private let modifiers: UInt32 = UInt32(cmdKey | shiftKey)     // ⌘⇧
-
     private let onPress:   () -> Void
     private let onRelease: () -> Void
     private var hotKeyRef:  EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
 
-    init(onPress: @escaping () -> Void, onRelease: @escaping () -> Void) {
+    init(keyCode: UInt32, modifiers: UInt32,
+         onPress: @escaping () -> Void, onRelease: @escaping () -> Void) {
         self.onPress   = onPress
         self.onRelease = onRelease
-        install()
+        installHandler()
+        register(keyCode: keyCode, modifiers: modifiers)
     }
 
     deinit {
@@ -39,16 +35,20 @@ final class GlobalHotkeyManager {
         if let r = handlerRef { RemoveEventHandler(r) }
     }
 
+    /// Unregister the current hotkey and register a new one.
+    func update(keyCode: UInt32, modifiers: UInt32) {
+        if let r = hotKeyRef { UnregisterEventHotKey(r); hotKeyRef = nil }
+        register(keyCode: keyCode, modifiers: modifiers)
+    }
+
     // MARK: - Private
 
-    private func install() {
+    private func installHandler() {
         let specs = [
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)),
         ]
-
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-
         _ = specs.withUnsafeBufferPointer { buf in
             InstallEventHandler(
                 GetApplicationEventTarget(),
@@ -69,14 +69,12 @@ final class GlobalHotkeyManager {
                 specs.count, buf.baseAddress, selfPtr, &handlerRef
             )
         }
+    }
 
+    private func register(keyCode: UInt32, modifiers: UInt32) {
         let hotKeyID = EventHotKeyID(signature: fourCharCode("SBDM"), id: 1)
-        RegisterEventHotKey(
-            keyCode, modifiers,
-            hotKeyID,
-            GetApplicationEventTarget(),
-            0, &hotKeyRef
-        )
+        RegisterEventHotKey(keyCode, modifiers, hotKeyID,
+                            GetApplicationEventTarget(), 0, &hotKeyRef)
     }
 }
 

@@ -1,3 +1,3 @@
 [submodule "backend"]
 	path = backend
-	url = git@github.com:sudoytang/speakboard.git
+	url = https://github.com/sudoytang/speakboard-be-sherpa.git

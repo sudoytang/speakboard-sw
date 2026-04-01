@@ -18,7 +18,10 @@ final class FloatingPanelController: NSObject {
     var pasteText: String? = nil
 
     // Injected by AppDelegate after both objects are created.
-    var sidecar: SidecarManager?
+    // didSet wires up the streaming callbacks from SidecarManager.
+    var sidecar: SidecarManager? {
+        didSet { setupSidecarCallbacks() }
+    }
 
     // Exposed read-only so PanelContentView can inspect it in keyDown.
     private(set) var state: PanelState = .idle
@@ -39,6 +42,47 @@ final class FloatingPanelController: NSObject {
     private var pressTime: Date?
     private var holdWorkItem: DispatchWorkItem?
 
+    // MARK: - Init
+
+    override init() {
+        super.init()
+        // Wire recorder's real-time chunks directly to the WebSocket.
+        // The closure is set once; it reads sidecar lazily at call time.
+        recorder.onChunk = { [weak self] data in
+            self?.sidecar?.sendAudioChunk(data)
+        }
+    }
+
+    // MARK: - SidecarManager callbacks
+
+    private func setupSidecarCallbacks() {
+        sidecar?.onPartial = { [weak self] text in
+            DispatchQueue.main.async { self?.handleLiveText(text) }
+        }
+        sidecar?.onGoldUpdate = { [weak self] text in
+            DispatchQueue.main.async { self?.handleLiveText(text) }
+        }
+        sidecar?.onFinalResult = { [weak self] text in
+            DispatchQueue.main.async { self?.handleFinalResult(text) }
+        }
+    }
+
+    /// Update the label with live partial/gold text while recording is active.
+    private func handleLiveText(_ text: String) {
+        guard case .recording = state else { return }
+        contentView?.showLiveText(text)
+    }
+
+    /// Handle the final transcription result (or nil = no speech) after Stop.
+    private func handleFinalResult(_ text: String?) {
+        guard case .transcribing = state else { return }
+        if let text {
+            finishResult(text: text, errorMessage: nil)
+        } else {
+            finishResult(text: nil, errorMessage: "No speech detected.")
+        }
+    }
+
     // MARK: - Hotkey entry points
 
     /// Called on hotkey key-down.
@@ -48,7 +92,7 @@ final class FloatingPanelController: NSObject {
         pressTime = Date()
 
         // Discard any in-flight recording from a previous session.
-        _ = recorder.stopRecording()
+        recorder.stopRecording()
 
         if window.isVisible {
             centerOnMouseScreen()
@@ -59,6 +103,9 @@ final class FloatingPanelController: NSObject {
         pasteText = nil
         state = .recording(.shortPress)
         contentView?.enterRecordingState(.shortPress)
+
+        // Begin a new WebSocket session before sending audio chunks.
+        sidecar?.beginSession()
 
         recorder.startRecording { error in
             if let error { print("[recorder] \(error.localizedDescription)") }
@@ -90,7 +137,8 @@ final class FloatingPanelController: NSObject {
 
     // MARK: - Transcription
 
-    /// Stop the recorder and send captured audio to the backend.
+    /// Stop the recorder and tell the backend to flush remaining audio.
+    /// The result arrives asynchronously via the onFinalResult callback.
     /// Entry points: Enter key (short press) and hotkey release (long press).
     func startTranscription() {
         guard case .recording = state else { return }
@@ -98,27 +146,9 @@ final class FloatingPanelController: NSObject {
         state = .transcribing
         contentView?.enterTranscribingState()
 
-        guard let audioData = recorder.stopRecording() else {
-            finishResult(text: nil, errorMessage: "No audio was captured.")
-            return
-        }
-        guard let sidecar else {
-            finishResult(text: nil, errorMessage: "Backend not connected.")
-            return
-        }
-
-        sidecar.transcribe(audioData: audioData) { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self, case .transcribing = self.state else { return }
-                switch result {
-                case .success(let text):
-                    self.finishResult(text: text, errorMessage: nil)
-                case .failure(let error):
-                    let msg = (error as? SidecarError)?.errorDescription ?? "Transcription failed."
-                    self.finishResult(text: nil, errorMessage: msg)
-                }
-            }
-        }
+        recorder.stopRecording()      // stop sending chunks
+        sidecar?.sendStop()           // signal backend to flush and transcribe
+        // handleFinalResult() will be called when the server responds.
     }
 
     // MARK: - Paste
@@ -140,7 +170,17 @@ final class FloatingPanelController: NSObject {
     func hide() {
         holdWorkItem?.cancel()
         holdWorkItem = nil
-        _ = recorder.stopRecording()
+        recorder.stopRecording()
+        switch state {
+        case .recording:
+            // Cancel the WebSocket session without triggering transcription.
+            sidecar?.cancelSession()
+        case .transcribing:
+            // Suppress the result that is already in flight.
+            sidecar?.discardPendingResult()
+        default:
+            break
+        }
         state = .idle
         window.orderOut(nil)
     }

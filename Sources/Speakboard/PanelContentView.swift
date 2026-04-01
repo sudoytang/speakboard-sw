@@ -37,23 +37,36 @@ final class PanelContentView: NSView {
 
     /// Prepare the panel for a new recording session.
     func enterRecordingState(_ style: PanelState.RecordStyle) {
+        resetLabelStyle()
         updateLabel("")
         updateHintForState(.recording(style))
         insertBtn.isEnabled = false
     }
 
-    /// Show the spinning-dots placeholder while waiting for the backend.
+    /// Keep the current label as-is while waiting for the final result.
     func enterTranscribingState() {
-        updateLabel("…")
         updateHintForState(.transcribing)
         insertBtn.isEnabled = false
     }
 
     /// Display the final transcript or error message.
     func enterResultState(text: String, pasteable: Bool) {
-        updateLabel(text)
+        if pasteable {
+            resetLabelStyle()
+            updateLabel(text)
+        } else {
+            // Status/error: small secondary style, no window resize needed.
+            label.font = .systemFont(ofSize: 15, weight: .regular)
+            label.textColor = .secondaryLabelColor
+            label.stringValue = "(\(text))"
+        }
         updateHintForState(.result)
         insertBtn.isEnabled = pasteable
+    }
+
+    /// Show real-time partial or gold-boundary text during recording.
+    func showLiveText(_ text: String) {
+        updateLabel(text)
     }
 
     /// Update only the hint label (called when the hold threshold is reached).
@@ -131,6 +144,11 @@ final class PanelContentView: NSView {
     }
 
     // MARK: - Layout
+
+    private func resetLabelStyle() {
+        label.font = .systemFont(ofSize: 28, weight: .medium)
+        label.textColor = .labelColor
+    }
 
     private func setupUI() {
         label.stringValue = ""

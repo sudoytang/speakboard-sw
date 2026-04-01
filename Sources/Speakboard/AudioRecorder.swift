@@ -1,12 +1,22 @@
 import AVFoundation
-import Accelerate
 
+// Streams real-time PCM i16 LE audio at 16 kHz mono to the provided onChunk callback.
+// Each call to onChunk delivers a Data blob containing raw 16-bit signed little-endian samples.
 final class AudioRecorder {
 
     private(set) var isRecording = false
 
+    /// Called on the AVAudioEngine internal thread with raw i16 LE PCM at 16 kHz mono.
+    var onChunk: ((Data) -> Void)?
+
     private let engine = AVAudioEngine()
-    private var capturedBuffers: [AVAudioPCMBuffer] = []
+    private var converter: AVAudioConverter?
+    private let outputFormat = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: 16_000,
+        channels: 1,
+        interleaved: false
+    )!
 
     // MARK: - Public
 
@@ -31,74 +41,71 @@ final class AudioRecorder {
         }
     }
 
-    /// Stop capturing and return the audio encoded as a WAV Data blob, or nil if nothing was recorded.
-    func stopRecording() -> Data? {
-        guard isRecording else { return nil }
+    /// Stop capturing. Any in-flight onChunk call may still complete after this returns.
+    func stopRecording() {
+        guard isRecording else { return }
         isRecording = false
-
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-
-        let data = Self.encodeWAV(buffers: capturedBuffers)
-        capturedBuffers.removeAll()
-        return data
+        converter = nil
     }
 
     // MARK: - Private
 
     private func doStart() throws {
-        capturedBuffers.removeAll()
-
         let inputNode = engine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
+        let inputFormat = inputNode.outputFormat(forBus: 0)
 
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-            guard let self else { return }
-            if let copy = buffer.copy() as? AVAudioPCMBuffer {
-                self.capturedBuffers.append(copy)
+        guard let conv = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+            throw NSError(domain: "AudioRecorder", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "Cannot create audio converter."])
+        }
+        converter = conv
+
+        let ratio = outputFormat.sampleRate / inputFormat.sampleRate
+
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] inBuf, _ in
+            guard let self, let conv = self.converter else { return }
+
+            let outCapacity = AVAudioFrameCount(Double(inBuf.frameLength) * ratio + 1)
+            guard let outBuf = AVAudioPCMBuffer(pcmFormat: self.outputFormat,
+                                                frameCapacity: outCapacity) else { return }
+
+            var inputConsumed = false
+            var convError: NSError?
+            let status = conv.convert(to: outBuf, error: &convError) { _, outStatus in
+                if inputConsumed {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                outStatus.pointee = .haveData
+                inputConsumed = true
+                return inBuf
             }
+
+            guard status != .error, outBuf.frameLength > 0 else { return }
+
+            let data = Self.toI16LE(outBuf)
+            if !data.isEmpty { self.onChunk?(data) }
         }
 
         try engine.start()
         isRecording = true
     }
 
-    // MARK: - WAV encoding (16-bit mono PCM)
+    // MARK: - Float32 mono → i16 LE
 
-    private static func encodeWAV(buffers: [AVAudioPCMBuffer]) -> Data? {
-        guard let first = buffers.first else { return nil }
-        let sampleRate  = UInt32(first.format.sampleRate)
-        let channelCount = Int(first.format.channelCount)
-
-        var samples = [Int16]()
-        for buf in buffers {
-            guard let channels = buf.floatChannelData else { continue }
-            let n = Int(buf.frameLength)
-            for frame in 0..<n {
-                var mono: Float = 0
-                for ch in 0..<channelCount { mono += channels[ch][frame] }
-                mono /= Float(channelCount)
-                samples.append(Int16(max(-1, min(1, mono)) * 32767))
+    private static func toI16LE(_ buffer: AVAudioPCMBuffer) -> Data {
+        guard let channels = buffer.floatChannelData else { return Data() }
+        let n = Int(buffer.frameLength)
+        var data = Data(count: n * 2)
+        data.withUnsafeMutableBytes { ptr in
+            let p = ptr.baseAddress!.assumingMemoryBound(to: Int16.self)
+            for i in 0..<n {
+                let clamped = max(-1.0, min(1.0, channels[0][i]))
+                p[i] = Int16(clamped * 32_767)
             }
         }
-        guard !samples.isEmpty else { return nil }
-
-        let dataSize = UInt32(samples.count * 2)
-        var h = Data()
-        h += ascii("RIFF"); h += le32(36 + dataSize)
-        h += ascii("WAVE")
-        h += ascii("fmt "); h += le32(16)
-        h += le16(1)                    // PCM
-        h += le16(1)                    // mono
-        h += le32(sampleRate)
-        h += le32(sampleRate * 2)       // byteRate
-        h += le16(2)                    // blockAlign
-        h += le16(16)                   // bitsPerSample
-        h += ascii("data"); h += le32(dataSize)
-        return h + samples.withUnsafeBytes { Data($0) }
+        return data
     }
-
-    private static func ascii(_ s: String) -> Data { s.data(using: .ascii)! }
-    private static func le32(_ v: UInt32) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
-    private static func le16(_ v: UInt16) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
 }
