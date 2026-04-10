@@ -13,7 +13,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Form fields
 
-    private let portField          = SettingsWindowController.numberField()
+    private let transportPopup: NSPopUpButton = {
+        let popup = NSPopUpButton()
+        BackendTransportKind.allCases.forEach { popup.addItem(withTitle: $0.displayName) }
+        return popup
+    }()
+    private let endpointField      = SettingsWindowController.endpointField()
     private let threadsField       = SettingsWindowController.numberField()
     private let silenceRmsField    = SettingsWindowController.numberField()
     private let partialField       = SettingsWindowController.numberField()
@@ -130,13 +135,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         hotkeyStack.spacing = 8
         hotkeyStack.alignment = .centerY
 
+        transportPopup.target = self
+        transportPopup.action = #selector(transportChanged)
+
         header("Hotkey")
         let hotkeyLbl = NSTextField(labelWithString: "Global shortcut")
         hotkeyLbl.alignment = .right
         grid.addRow(with: [hotkeyLbl, hotkeyStack])
 
         header("Server")
-        row("Port",    field: portField)
+        grid.addRow(with: [
+            NSTextField(labelWithString: "Transport"),
+            transportPopup,
+        ])
+        row("Endpoint", field: endpointField)
         row("Threads", field: threadsField)
 
         header("VAD")
@@ -192,7 +204,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         hotkeyDisplayField.stringValue = Self.hotkeyDisplayString(
             keyCode: recordedKeyCode, modifiers: recordedModifiers
         )
-        portField.stringValue          = "\(settings.port)"
+        if let idx = BackendTransportKind.allCases.firstIndex(of: settings.transportKind) {
+            transportPopup.selectItem(at: idx)
+        }
+        switch settings.sidecarEndpoint {
+        case .unix(let path):
+            endpointField.stringValue = path
+        case .loopbackTcp(_, let port):
+            endpointField.stringValue = "\(port)"
+        }
+        applyEndpointFieldStyle()
         threadsField.stringValue       = "\(settings.numThreads)"
         silenceRmsField.stringValue    = format(settings.silenceRmsThreshold)
         partialField.stringValue       = format(settings.partialSilenceSecs)
@@ -210,7 +231,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             settings.hotkeyKeyCode  = Int(recordedKeyCode)
             settings.hotkeyModifiers = Int(recordedModifiers)
         }
-        settings.port                  = Int(portField.stringValue)          ?? SettingsStore.defaultPort
+        settings.transportKind = selectedTransportKind()
+        let endpointValue = endpointField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch settings.transportKind {
+        case .unixDomainSocket:
+            settings.socketPath = endpointValue.isEmpty ? SettingsStore.defaultSocketPath : endpointValue
+        case .loopbackTcp:
+            settings.port = Int(endpointValue) ?? SettingsStore.defaultPort
+        }
         settings.numThreads            = Int(threadsField.stringValue)       ?? SettingsStore.defaultNumThreads
         settings.silenceRmsThreshold   = Double(silenceRmsField.stringValue) ?? SettingsStore.defaultSilenceRmsThreshold
         settings.partialSilenceSecs    = Double(partialField.stringValue)    ?? SettingsStore.defaultPartialSilenceSecs
@@ -238,6 +266,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     @objc private func resetDefaults() {
         settings.resetToDefaults()
         loadValues()
+    }
+
+    @objc private func transportChanged() {
+        let trimmed = endpointField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            endpointField.stringValue = defaultEndpointValue(for: selectedTransportKind())
+        }
+        applyEndpointFieldStyle()
     }
 
     // MARK: - Hotkey recorder
@@ -344,6 +380,29 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         v.truncatingRemainder(dividingBy: 1) == 0 ? String(Int(v)) : String(v)
     }
 
+    private func selectedTransportKind() -> BackendTransportKind {
+        let idx = max(0, transportPopup.indexOfSelectedItem)
+        return BackendTransportKind.allCases[idx]
+    }
+
+    private func defaultEndpointValue(for kind: BackendTransportKind) -> String {
+        switch kind {
+        case .unixDomainSocket:
+            return SettingsStore.defaultSocketPath
+        case .loopbackTcp:
+            return String(SettingsStore.defaultPort)
+        }
+    }
+
+    private func applyEndpointFieldStyle() {
+        switch selectedTransportKind() {
+        case .unixDomainSocket:
+            endpointField.placeholderString = SettingsStore.defaultSocketPath
+        case .loopbackTcp:
+            endpointField.placeholderString = String(SettingsStore.defaultPort)
+        }
+    }
+
     private static func numberField() -> NSTextField {
         let f = NSTextField()
         f.placeholderString = "default"
@@ -354,6 +413,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private static func pathField() -> NSTextField {
         let f = NSTextField()
         f.placeholderString = "(auto)"
+        f.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return f
+    }
+
+    private static func endpointField() -> NSTextField {
+        let f = NSTextField()
         f.setContentHuggingPriority(.defaultLow, for: .horizontal)
         return f
     }

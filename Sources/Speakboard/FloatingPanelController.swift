@@ -46,7 +46,7 @@ final class FloatingPanelController: NSObject {
 
     override init() {
         super.init()
-        // Wire recorder's real-time chunks directly to the WebSocket.
+        // Wire recorder's real-time chunks directly to the sidecar transport.
         // The closure is set once; it reads sidecar lazily at call time.
         recorder.onChunk = { [weak self] data in
             self?.sidecar?.sendAudioChunk(data)
@@ -104,7 +104,7 @@ final class FloatingPanelController: NSObject {
         state = .recording(.shortPress)
         contentView?.enterRecordingState(.shortPress)
 
-        // Begin a new WebSocket session before sending audio chunks.
+        // Begin a new sidecar session before sending audio chunks.
         sidecar?.beginSession()
 
         recorder.startRecording { error in
@@ -173,7 +173,7 @@ final class FloatingPanelController: NSObject {
         recorder.stopRecording()
         switch state {
         case .recording:
-            // Cancel the WebSocket session without triggering transcription.
+            // Cancel the current sidecar session without triggering transcription.
             sidecar?.cancelSession()
         case .transcribing:
             // Suppress the result that is already in flight.
