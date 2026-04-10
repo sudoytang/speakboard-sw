@@ -1,9 +1,9 @@
 import Foundation
 
-// Manages the Rust backend sidecar process and a persistent WebSocket connection to it.
+// Manages the Rust backend sidecar wrapper and a persistent WebSocket connection to it.
 //
 // Connection lifecycle:
-//   start() → launch process → connect after 2 s → receive "ready" → isReady = true
+//   start() → launch wrapper → connect after 2 s → receive "ready" → isReady = true
 //   Per recording session: beginSession() → sendAudioChunk() × N → sendStop()
 //   → server sends GoldReplace → onFinalResult called → WS closes → reconnect
 //   On unexpected disconnect: retry up to maxReconnectAttempts, then restart process.
@@ -41,6 +41,7 @@ final class SidecarManager {
     // MARK: - Internal
 
     private var process: Process?
+    private var processStdinPipe: Pipe?
     private var wsTask: URLSessionWebSocketTask?
     private lazy var urlSession = URLSession(configuration: .default)
 
@@ -89,9 +90,7 @@ final class SidecarManager {
         reconnectWorkItem?.cancel()
         wsTask?.cancel(with: .goingAway, reason: nil)
         wsTask = nil
-        process?.terminate()
-        process?.waitUntilExit()
-        process = nil
+        shutdownProcess()
         isReady = false
     }
 
@@ -140,21 +139,49 @@ final class SidecarManager {
 
         let p = Process()
         let binaryPath = backendDir.appendingPathComponent("target/release/speakboard-be-sherpa").path
+        let wrapperPath = backendDir.appendingPathComponent("target/release/speakboard-sidecar-wrapper").path
 
         // --config passes all settings; ENV vars (PORT, NUM_THREADS, etc.) override JSON if set.
         let configPath = settings.configFilePath.path
+        let hasBackendBinary = FileManager.default.isExecutableFile(atPath: binaryPath)
+        let hasWrapperBinary = FileManager.default.isExecutableFile(atPath: wrapperPath)
+        let stdinPipe = Pipe()
 
-        if FileManager.default.isExecutableFile(atPath: binaryPath) {
-            p.executableURL = URL(fileURLWithPath: binaryPath)
-            p.arguments = ["--config", configPath]
+        p.standardInput = stdinPipe
+        processStdinPipe = stdinPipe
+
+        if hasWrapperBinary {
+            p.executableURL = URL(fileURLWithPath: wrapperPath)
             p.currentDirectoryURL = backendDir
+            if hasBackendBinary {
+                p.arguments = [binaryPath, "--config", configPath]
+            } else if let cargoPath = findCargoPath() {
+                print("[sidecar] pre-built backend binary not found; wrapper will launch cargo run --release (first run may take a while)")
+                p.arguments = [cargoPath, "run", "--release", "--", "--config", configPath]
+            } else {
+                print("[sidecar] backend not runnable — build the wrapper and backend, or install cargo")
+                processStdinPipe = nil
+                return
+            }
         } else if let cargoPath = findCargoPath() {
-            print("[sidecar] pre-built binary not found; using cargo run --release (first run may take a while)")
+            print("[sidecar] pre-built wrapper not found; using cargo run --release --bin speakboard-sidecar-wrapper")
             p.executableURL = URL(fileURLWithPath: cargoPath)
-            p.arguments = ["run", "--release", "--", "--config", configPath]
             p.currentDirectoryURL = backendDir
+            if hasBackendBinary {
+                p.arguments = [
+                    "run", "--release", "--bin", "speakboard-sidecar-wrapper", "--",
+                    binaryPath, "--config", configPath,
+                ]
+            } else {
+                print("[sidecar] pre-built backend binary not found; wrapper will launch cargo run --release (first run may take a while)")
+                p.arguments = [
+                    "run", "--release", "--bin", "speakboard-sidecar-wrapper", "--",
+                    cargoPath, "run", "--release", "--", "--config", configPath,
+                ]
+            }
         } else {
-            print("[sidecar] backend not runnable — run: cd backend && cargo build --release")
+            print("[sidecar] wrapper not runnable — run: cd backend && cargo build --release")
+            processStdinPipe = nil
             return
         }
 
@@ -179,6 +206,7 @@ final class SidecarManager {
             DispatchQueue.main.async {
                 print("[sidecar] process exited (code \(proc.terminationStatus))")
                 self?.process = nil
+                self?.processStdinPipe = nil
                 self?.isReady = false
                 self?.wsTask = nil
             }
@@ -189,6 +217,7 @@ final class SidecarManager {
             process = p
             print("[sidecar] started pid \(p.processIdentifier)")
         } catch {
+            processStdinPipe = nil
             print("[sidecar] failed to start process: \(error)")
             return
         }
@@ -340,12 +369,19 @@ final class SidecarManager {
     }
 
     private func restartServer() {
-        process?.terminate()
-        process?.waitUntilExit()
-        process = nil
+        shutdownProcess()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.startProcess()
         }
+    }
+
+    private func shutdownProcess() {
+        if let pipe = processStdinPipe {
+            pipe.fileHandleForWriting.closeFile()
+            processStdinPipe = nil
+        }
+        process?.waitUntilExit()
+        process = nil
     }
 
     private func buildDisplayText() -> String {
