@@ -11,6 +11,7 @@ let package = Package(
             linkerSettings: [
                 // Carbon is needed for RegisterEventHotKey (global hotkey, no Accessibility permission required).
                 .linkedFramework("Carbon"),
+                .linkedFramework("Network"),
             ]
         ),
     ]

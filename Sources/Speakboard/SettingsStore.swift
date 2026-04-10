@@ -18,7 +18,12 @@ final class SettingsStore {
 
     // MARK: - Defaults (must match backend's ResolvedConfig::default())
 
+    static let defaultTransportKind: BackendTransportKind = .unixDomainSocket
     static let defaultPort: Int = 8080
+    static let defaultSocketPath: String = FileManager.default
+        .temporaryDirectory
+        .appendingPathComponent("speakboard-sidecar.sock")
+        .path
     static let defaultNumThreads: Int = 4
     static let defaultSilenceRmsThreshold: Double = 0.02
     static let defaultPartialSilenceSecs: Double = 0.8
@@ -32,9 +37,23 @@ final class SettingsStore {
     private let ud = UserDefaults.standard
     private let ns = "speakboard.backend."
 
+    var transportKind: BackendTransportKind {
+        get {
+            guard let raw = ud.string(forKey: ns + "transport"),
+                  let kind = BackendTransportKind(rawValue: raw) else {
+                return Self.defaultTransportKind
+            }
+            return kind
+        }
+        set { ud.set(newValue.rawValue, forKey: ns + "transport") }
+    }
     var port: Int {
         get { ud.object(forKey: ns + "port") as? Int ?? Self.defaultPort }
         set { ud.set(newValue, forKey: ns + "port") }
+    }
+    var socketPath: String {
+        get { ud.string(forKey: ns + "socketPath") ?? Self.defaultSocketPath }
+        set { ud.set(newValue, forKey: ns + "socketPath") }
     }
     var numThreads: Int {
         get { ud.object(forKey: ns + "numThreads") as? Int ?? Self.defaultNumThreads }
@@ -89,10 +108,22 @@ final class SettingsStore {
         set { ud.set(newValue, forKey: ns + "hotkeyModifiers") }
     }
 
+    var sidecarEndpoint: SidecarEndpoint {
+        switch transportKind {
+        case .unixDomainSocket:
+            let path = socketPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            return .unix(path: path.isEmpty ? Self.defaultSocketPath : path)
+        case .loopbackTcp:
+            let clampedPort = UInt16(max(1, min(port, Int(UInt16.max))))
+            return .loopbackTcp(host: "127.0.0.1", port: clampedPort)
+        }
+    }
+
     // MARK: - Reset
 
     func resetToDefaults() {
-        [ns + "port", ns + "numThreads", ns + "silenceRmsThreshold",
+        [ns + "transport", ns + "port", ns + "socketPath",
+         ns + "numThreads", ns + "silenceRmsThreshold",
          ns + "partialSilenceSecs", ns + "goldSilenceSecs", ns + "maxGoldSecs",
          ns + "minTranscribeSecs", ns + "minSpeechSecs",
          ns + "modelPath", ns + "tokensPath",
@@ -114,7 +145,7 @@ final class SettingsStore {
     @discardableResult
     func writeConfigFile() throws -> URL {
         var dict: [String: Any] = [
-            "port":                     port,
+            "transport":                transportKind.rawValue,
             "num_threads":              numThreads,
             "silence_rms_threshold":    silenceRmsThreshold,
             "partial_silence_secs":     partialSilenceSecs,
@@ -123,6 +154,12 @@ final class SettingsStore {
             "min_transcribe_secs":      minTranscribeSecs,
             "min_speech_secs":          minSpeechSecs,
         ]
+        switch sidecarEndpoint {
+        case .unix(let path):
+            dict["socket_path"] = path
+        case .loopbackTcp(_, let port):
+            dict["port"] = Int(port)
+        }
         if !modelPath.isEmpty  { dict["model_path"]   = modelPath }
         if !tokensPath.isEmpty { dict["tokens_path"]  = tokensPath }
 

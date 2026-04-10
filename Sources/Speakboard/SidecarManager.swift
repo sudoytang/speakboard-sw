@@ -1,18 +1,18 @@
 import Foundation
 
-// Manages the Rust backend sidecar wrapper and a persistent WebSocket connection to it.
+// Manages the Rust backend sidecar wrapper and a persistent local IPC connection to it.
 //
 // Connection lifecycle:
 //   start() → launch wrapper → connect after 2 s → receive "ready" → isReady = true
 //   Per recording session: beginSession() → sendAudioChunk() × N → sendStop()
-//   → server sends GoldReplace → onFinalResult called → WS closes → reconnect
+//   → server sends GoldReplace → onFinalResult called → connection closes → reconnect
 //   On unexpected disconnect: retry up to maxReconnectAttempts, then restart process.
 
 final class SidecarManager {
 
     // MARK: - Callbacks (set by FloatingPanelController before start())
 
-    /// Called once the WebSocket connection is established and the server sends "ready".
+    /// Called once the transport is established and the server sends "ready".
     var onReady: (() -> Void)?
     /// Called with the latest provisional transcription text during recording.
     var onPartial: ((String) -> Void)?
@@ -28,7 +28,6 @@ final class SidecarManager {
     // MARK: - Config
 
     private let settings: SettingsStore
-    private var port: Int { settings.port }
 
     init(settings: SettingsStore = .shared) {
         self.settings = settings
@@ -42,8 +41,7 @@ final class SidecarManager {
 
     private var process: Process?
     private var processStdinPipe: Pipe?
-    private var wsTask: URLSessionWebSocketTask?
-    private lazy var urlSession = URLSession(configuration: .default)
+    private var transport: FramedSidecarTransport?
 
     private var shouldReconnect = true
     private var reconnectAttempts = 0
@@ -88,8 +86,8 @@ final class SidecarManager {
     func stop() {
         shouldReconnect = false
         reconnectWorkItem?.cancel()
-        wsTask?.cancel(with: .goingAway, reason: nil)
-        wsTask = nil
+        transport?.close()
+        transport = nil
         shutdownProcess()
         isReady = false
     }
@@ -106,10 +104,8 @@ final class SidecarManager {
 
     /// Send raw PCM i16 LE audio chunk to the server. Safe to call from any thread.
     func sendAudioChunk(_ data: Data) {
-        guard isReady, let task = wsTask else { return }
-        task.send(.data(data)) { error in
-            if let error { print("[sidecar] chunk send error: \(error)") }
-        }
+        guard isReady else { return }
+        transport?.sendAudioChunk(data)
     }
 
     /// Signal the server to flush remaining audio and produce the final transcription.
@@ -208,7 +204,7 @@ final class SidecarManager {
                 self?.process = nil
                 self?.processStdinPipe = nil
                 self?.isReady = false
-                self?.wsTask = nil
+                self?.transport = nil
             }
         }
 
@@ -250,16 +246,33 @@ final class SidecarManager {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    // MARK: - WebSocket
+    // MARK: - Transport
 
     private func connect() {
         guard shouldReconnect else { return }
-        let url = URL(string: "ws://127.0.0.1:\(port)/ws")!
-        let task = urlSession.webSocketTask(with: url)
-        wsTask = task
-        task.resume()
-        receiveLoop()
-        print("[sidecar] connecting to \(url)")
+        let transport = FramedSidecarTransport(endpoint: settings.sidecarEndpoint)
+        self.transport = transport
+
+        transport.onText = { [weak self] text in
+            self?.handleText(text)
+        }
+        transport.onDisconnect = { [weak self] error in
+            guard let self else { return }
+            if !self.sessionStopped, let error {
+                print("[sidecar] transport error: \(error.localizedDescription)")
+            }
+            self.onDisconnected()
+        }
+        transport.connect { [weak self] error in
+            guard let self else { return }
+            if let error {
+                print("[sidecar] connect failed: \(error.localizedDescription)")
+                return
+            }
+            print("[sidecar] connected to \(transport.endpointDescription)")
+            self.sendText(#"{"type":"start"}"#)
+        }
+        print("[sidecar] connecting to \(transport.endpointDescription)")
     }
 
     private func scheduleConnect(delay: TimeInterval) {
@@ -267,29 +280,6 @@ final class SidecarManager {
         let item = DispatchWorkItem { [weak self] in self?.connect() }
         reconnectWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
-    }
-
-    private func receiveLoop() {
-        wsTask?.receive { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .success(let message):
-                let text: String?
-                switch message {
-                case .string(let s): text = s
-                case .data(let d):   text = String(data: d, encoding: .utf8)
-                @unknown default:    text = nil
-                }
-                if let text { DispatchQueue.main.async { self.handleText(text) } }
-                self.receiveLoop()
-            case .failure(let error):
-                // Suppress the log for expected disconnects (server closed after Stop).
-                if !self.sessionStopped {
-                    print("[sidecar] WS receive error: \(error.localizedDescription)")
-                }
-                DispatchQueue.main.async { self.onDisconnected() }
-            }
-        }
     }
 
     private func handleText(_ text: String) {
@@ -337,7 +327,7 @@ final class SidecarManager {
     private func onDisconnected() {
         guard shouldReconnect else { return }
         isReady = false
-        wsTask = nil
+        transport = nil
 
         // If a session was stopped but no GoldReplace arrived before disconnect, deliver nil.
         if sessionStopped && !finalResultDelivered {
@@ -390,9 +380,6 @@ final class SidecarManager {
     }
 
     private func sendText(_ text: String) {
-        guard let task = wsTask else { return }
-        task.send(.string(text)) { error in
-            if let error { print("[sidecar] text send error: \(error)") }
-        }
+        transport?.sendJSONText(text)
     }
 }
