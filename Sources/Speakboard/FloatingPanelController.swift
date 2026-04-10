@@ -55,6 +55,12 @@ final class FloatingPanelController: NSObject {
 
     // MARK: - SidecarManager callbacks
 
+    /// Re-attach the panel's own callbacks on the shared sidecar.
+    /// Called by InlineDictationController after it finishes a session.
+    func reattachSidecarCallbacks() {
+        setupSidecarCallbacks()
+    }
+
     private func setupSidecarCallbacks() {
         sidecar?.onPartial = { [weak self] text in
             DispatchQueue.main.async { self?.handleLiveText(text) }

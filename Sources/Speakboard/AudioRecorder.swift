@@ -3,6 +3,10 @@ import CoreAudio
 
 // Streams real-time PCM i16 LE audio at 16 kHz mono to the provided onChunk callback.
 // Each call to onChunk delivers a Data blob containing raw 16-bit signed little-endian samples.
+//
+// LATENCY NOTE: Call warmUp() once after mic permission is granted to pre-start the
+// AVAudioEngine.  Subsequent startRecording() calls open a gate on the already-running
+// tap instead of rebuilding the engine chain, eliminating the ~200 ms startup delay.
 final class AudioRecorder {
 
     private struct InputFormatKey: Equatable {
@@ -53,6 +57,23 @@ final class AudioRecorder {
 
     // MARK: - Public
 
+    /// Pre-start the audio engine so the first startRecording() is instant.
+    /// Safe to call multiple times; no-op if already warm.
+    func warmUp() {
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+            guard granted else { return }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard self.engine == nil || self.audioChainDirty else { return }
+                do {
+                    try self.buildAndStartEngine()
+                } catch {
+                    print("[recorder] warmUp failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
     /// Request microphone permission if needed, then start capturing audio.
     func startRecording(completion: @escaping (Error?) -> Void) {
         guard !isRecording else { completion(nil); return }
@@ -64,8 +85,14 @@ final class AudioRecorder {
                                       userInfo: [NSLocalizedDescriptionKey: "Microphone access denied."]))
                     return
                 }
+                guard let self else { return }
                 do {
-                    try self?.doStart()
+                    // Rebuild only if the chain is dirty or engine was never started.
+                    if self.engine == nil || self.audioChainDirty || !(self.engine?.isRunning ?? false) {
+                        try self.buildAndStartEngine()
+                    }
+                    // Open the gate — tap is already running.
+                    self.isRecording = true
                     completion(nil)
                 } catch {
                     completion(error)
@@ -74,37 +101,46 @@ final class AudioRecorder {
         }
     }
 
-    /// Stop capturing. Any in-flight onChunk call may still complete after this returns.
+    /// Stop capturing. The engine keeps running so the next startRecording() is instant.
     func stopRecording() {
         guard isRecording else { return }
         isRecording = false
-        engine?.inputNode.removeTap(onBus: 0)
-        engine?.stop()
-        converter = nil
-        converterInputFormat = nil
-
+        // Do NOT remove the tap or stop the engine — keep it warm for the next session.
+        // If the audio chain became dirty while recording, rebuild it now.
         if audioChainDirty {
             teardownEngine()
+            // Re-warm immediately so it is ready for the next session.
+            do { try buildAndStartEngine() } catch {
+                print("[recorder] re-warm after dirty stop failed: \(error.localizedDescription)")
+            }
         }
     }
 
     // MARK: - Private
 
-    private func doStart() throws {
-        rebuildEngineIfNeeded()
+    /// Build (or rebuild) the engine, install the tap, and start the engine.
+    private func buildAndStartEngine() throws {
+        teardownEngine()
 
-        guard let engine else {
-            throw NSError(domain: "AudioRecorder", code: 2,
-                          userInfo: [NSLocalizedDescriptionKey: "Cannot create audio engine."])
+        let engine = AVAudioEngine()
+        self.engine = engine
+        audioChainDirty = false
+
+        engineConfigObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main
+        ) { [weak self] _ in
+            self?.markAudioChainDirty()
         }
 
         let inputNode = engine.inputNode
-        inputNode.removeTap(onBus: 0)
 
-        // Let AVAudioEngine pick the bus format so a device switch does not leave us
-        // installing a tap with a stale format from the previous input route.
+        // format: nil lets AVAudioEngine use the native hardware format,
+        // avoiding tap-format-mismatch crashes with Bluetooth devices.
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] inBuf, _ in
-            guard let self, let conv = self.converter(for: inBuf.format) else { return }
+            guard let self, self.isRecording,       // gate: only forward when active
+                  let conv = self.converter(for: inBuf.format) else { return }
 
             let ratio = self.outputFormat.sampleRate / inBuf.format.sampleRate
             let outCapacity = AVAudioFrameCount(Double(inBuf.frameLength) * ratio + 1)
@@ -130,7 +166,6 @@ final class AudioRecorder {
         }
 
         try engine.start()
-        isRecording = true
     }
 
     private func converter(for inputFormat: AVAudioFormat) -> AVAudioConverter? {
@@ -138,32 +173,13 @@ final class AudioRecorder {
         if converterInputFormat == key, let converter {
             return converter
         }
-
         guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
             print("[recorder] cannot create audio converter for input format: \(inputFormat)")
             return nil
         }
-
         self.converter = converter
         converterInputFormat = key
         return converter
-    }
-
-    private func rebuildEngineIfNeeded() {
-        guard engine == nil || audioChainDirty else { return }
-        teardownEngine()
-
-        let engine = AVAudioEngine()
-        self.engine = engine
-        audioChainDirty = false
-
-        engineConfigObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: .main
-        ) { [weak self] _ in
-            self?.markAudioChainDirty()
-        }
     }
 
     private func teardownEngine() {
