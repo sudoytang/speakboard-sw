@@ -5,9 +5,16 @@ import AppKit
 // The panel uses .nonactivatingPanel so clicking it NEVER steals keyboard focus
 // or application activation from the frontmost app — the cursor stays where it is.
 //
-// IMPLEMENTATION NOTE: The button is an NSButton subclass (not NSView) because
-// AppKit's event routing to NSButton inside a .nonactivatingPanel is more reliable
-// than routing to a plain NSView.
+// SPACE / MULTI-MONITOR BEHAVIOUR
+// ────────────────────────────────
+// collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary] keeps the panel
+// visible on every Mission Control Space so the user never loses access to it.
+//
+// In addition, the panel tracks its position as a *relative ratio* of the screen's
+// visible frame (saved to UserDefaults).  When the active Space changes the panel
+// repositions itself to the same proportional corner on whichever screen the cursor
+// is currently on.  This means the button always stays in "the same place" even
+// when switching between monitors with different resolutions.
 
 final class MicButtonPanel {
 
@@ -28,13 +35,123 @@ final class MicButtonPanel {
     private lazy var nsPanel: NSPanel = makePanel()
     private weak var micButton: MicHoldButton?
 
+    private var spaceObserver:  NSObjectProtocol?
+    private var screenObserver: NSObjectProtocol?
+    /// Hardware display ID of the screen the panel is currently on.
+    private var trackedDisplayID: UInt32?
+
+    // MARK: - Relative position (persisted)
+
+    private static let relXKey = "micButtonRelX"
+    private static let relYKey = "micButtonRelY"
+
+    /// Returns the saved ratio, or nil if never saved.
+    private var savedRelativePosition: NSPoint? {
+        let d = UserDefaults.standard
+        guard d.object(forKey: Self.relXKey) != nil else { return nil }
+        return NSPoint(x: d.double(forKey: Self.relXKey),
+                       y: d.double(forKey: Self.relYKey))
+    }
+
+    /// Persist the panel's current position as a ratio of its screen's visible frame,
+    /// and record the hardware display ID of that screen.
+    private func saveRelativePosition() {
+        let frame = nsPanel.frame
+        let center = NSPoint(x: frame.midX, y: frame.midY)
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(center) })
+                ?? NSScreen.main else { return }
+        let sf = screen.visibleFrame
+        let relX = (center.x - sf.minX) / sf.width
+        let relY = (center.y - sf.minY) / sf.height
+        UserDefaults.standard.set(relX, forKey: Self.relXKey)
+        UserDefaults.standard.set(relY, forKey: Self.relYKey)
+        trackedDisplayID = screen.displayID
+    }
+
+    /// Move the panel to the saved ratio on the given screen.
+    private func restorePosition(on screen: NSScreen) {
+        let size   = nsPanel.frame.size
+        let sf     = screen.visibleFrame
+        let rel    = savedRelativePosition ?? NSPoint(x: 0.95, y: 0.05) // default: bottom-right
+        let cx     = sf.minX + rel.x * sf.width
+        let cy     = sf.minY + rel.y * sf.height
+        let origin = NSPoint(x: cx - size.width / 2, y: cy - size.height / 2)
+        nsPanel.setFrameOrigin(origin)
+    }
+
     // MARK: - Public
 
-    func show() { nsPanel.orderFrontRegardless() }
-    func hide() { nsPanel.orderOut(nil) }
+    func show() {
+        // Restore to saved position on the current screen before making visible.
+        let screen = screenAtCursor() ?? NSScreen.main
+        if let screen {
+            restorePosition(on: screen)
+            trackedDisplayID = screen.displayID
+        }
+        nsPanel.orderFrontRegardless()
+        observeSpaceChanges()
+        observeScreenChanges()
+    }
+
+    func hide() {
+        nsPanel.orderOut(nil)
+        spaceObserver  = nil
+        screenObserver = nil
+    }
 
     func setRecording(_ recording: Bool) {
         micButton?.isRecordingActive = recording
+    }
+
+    // MARK: - Space change observation
+
+    private func observeSpaceChanges() {
+        spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleSpaceChange()
+        }
+    }
+
+    private func observeScreenChanges() {
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleScreenChange()
+        }
+    }
+
+    private func handleSpaceChange() {
+        guard let screen = screenAtCursor() ?? NSScreen.main else { return }
+        restorePosition(on: screen)
+    }
+
+    /// Called when a monitor is connected or disconnected.
+    ///
+    /// We track the *hardware display ID* of the screen the panel is on rather
+    /// than checking absolute coordinates.  When the left monitor is removed the
+    /// global coordinate system shifts, so the button's old coordinates may still
+    /// fall inside the surviving monitor's frame — but the tracked display ID is
+    /// gone, which is the reliable signal that we need to reposition.
+    private func handleScreenChange() {
+        let availableIDs = Set(NSScreen.screens.compactMap { $0.displayID })
+
+        let trackedIsGone = trackedDisplayID.map { !availableIDs.contains($0) } ?? false
+        guard trackedIsGone else { return }
+
+        let target = screenAtCursor() ?? NSScreen.main!
+        trackedDisplayID = target.displayID
+        restorePosition(on: target)
+        nsPanel.orderFrontRegardless()
+    }
+
+    private func screenAtCursor() -> NSScreen? {
+        let loc = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(loc) }
     }
 
     // MARK: - Panel construction
@@ -58,15 +175,18 @@ final class MicButtonPanel {
         panel.titleVisibility  = .hidden
         panel.titlebarAppearsTransparent = true
         panel.titlebarSeparatorStyle = .none
-        panel.standardWindowButton(.closeButton)?.isHidden = true
+        panel.standardWindowButton(.closeButton)?.isHidden     = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden      = true
 
+        // Appear on every Space and inside fullscreen apps.
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        // Initial position: default bottom-right of main screen (overridden by show()).
         if let screen = NSScreen.main {
             let sf = screen.visibleFrame
             panel.setFrameOrigin(NSPoint(x: sf.maxX - size - 24, y: sf.minY + 24))
         }
-        panel.center()
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: size, height: size))
         container.autoresizingMask = [.width, .height]
@@ -80,6 +200,7 @@ final class MicButtonPanel {
             self?.currentMode = mode
             self?.onModeChange?(mode)
         }
+        btn.onDragEnded = { [weak self] in self?.saveRelativePosition() }
         btn.autoresizingMask = [.width, .height]
         micButton = btn
 
@@ -105,6 +226,8 @@ private final class MicHoldButton: NSButton {
     /// Fired when mouse up happens without a significant drag.
     var onTap:        (() -> Void)?
     var onModeChange: ((DictationMode) -> Void)?
+    /// Fired after a drag ends so MicButtonPanel can persist the new position.
+    var onDragEnded:  (() -> Void)?
 
     var currentMode: DictationMode = .hold
 
@@ -191,7 +314,11 @@ private final class MicHoldButton: NSButton {
         dragStartWindowOrigin = nil
         hasDragged = false
 
-        if !wasDrag { onTap?() }
+        if wasDrag {
+            onDragEnded?()   // persist new relative position
+        } else {
+            onTap?()
+        }
         onRelease?()
     }
 
@@ -200,20 +327,15 @@ private final class MicHoldButton: NSButton {
     override func rightMouseDown(with event: NSEvent) {
         let menu = NSMenu(title: "")
 
-        // — Hold to Speak —
-        let holdItem = menuItem(.hold)
-        menu.addItem(holdItem)
+        menu.addItem(menuItem(.hold))
 
-        // — Click to Start (submenu) —
         let clickModes: [DictationMode] = [
             .toggle,
             .autoStop(silenceDelay: 1.0),
             .autoStop(silenceDelay: 2.0),
         ]
         let clickParent = NSMenuItem(title: "Click to Start", action: nil, keyEquivalent: "")
-        let isClickMode = clickModes.contains(currentMode)
-        if isClickMode { clickParent.state = .on }
-
+        if clickModes.contains(currentMode) { clickParent.state = .on }
         let sub = NSMenu(title: "")
         for m in clickModes { sub.addItem(menuItem(m)) }
         clickParent.submenu = sub
@@ -240,6 +362,15 @@ private final class MicHoldButton: NSButton {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var acceptsFirstResponder: Bool { false }
+}
+
+// MARK: - NSScreen display ID helper
+
+private extension NSScreen {
+    /// The CGDirectDisplayID for this screen, or nil if unavailable.
+    var displayID: UInt32? {
+        deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32
+    }
 }
 
 /// Simple wrapper so DictationMode (not an NSObject) can be stored as representedObject.
