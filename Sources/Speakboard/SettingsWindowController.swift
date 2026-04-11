@@ -28,6 +28,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let minSpeechField     = SettingsWindowController.numberField()
     private let modelPathField     = SettingsWindowController.pathField()
     private let tokensPathField    = SettingsWindowController.pathField()
+    private let inlineWarmUpCheckbox = NSButton(checkboxWithTitle: "Keep microphone pre-warmed", target: nil, action: nil)
 
     // MARK: - Hotkey recorder state
 
@@ -143,6 +144,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         hotkeyLbl.alignment = .right
         grid.addRow(with: [hotkeyLbl, hotkeyStack])
 
+        header("Microphone")
+        let inlineWarmUpLabel = NSTextField(labelWithString: "Low-latency startup")
+        inlineWarmUpLabel.alignment = .right
+        inlineWarmUpCheckbox.setButtonType(.switch)
+        grid.addRow(with: [inlineWarmUpLabel, inlineWarmUpCheckbox])
+
         header("Server")
         grid.addRow(with: [
             NSTextField(labelWithString: "Transport"),
@@ -223,6 +230,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         minSpeechField.stringValue     = format(settings.minSpeechSecs)
         modelPathField.stringValue     = settings.modelPath
         tokensPathField.stringValue    = settings.tokensPath
+        inlineWarmUpCheckbox.state     = settings.inlineWarmUpEnabled ? .on : .off
     }
 
     @objc private func saveAndRestart() {
@@ -248,6 +256,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         settings.minSpeechSecs         = Double(minSpeechField.stringValue)  ?? SettingsStore.defaultMinSpeechSecs
         settings.modelPath             = modelPathField.stringValue.trimmingCharacters(in: .whitespaces)
         settings.tokensPath            = tokensPathField.stringValue.trimmingCharacters(in: .whitespaces)
+        settings.inlineWarmUpEnabled   = inlineWarmUpCheckbox.state == .on
 
         do {
             try settings.writeConfigFile()

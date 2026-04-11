@@ -98,6 +98,7 @@ final class SettingsStore {
 
     static let defaultHotkeyKeyCode: Int = 6       // kVK_ANSI_Z
     static let defaultHotkeyModifiers: Int = 4352  // cmdKey | controlKey
+    static let defaultInlineWarmUpEnabled = true
 
     var hotkeyKeyCode: Int {
         get { ud.object(forKey: ns + "hotkeyKeyCode") as? Int ?? Self.defaultHotkeyKeyCode }
@@ -106,6 +107,15 @@ final class SettingsStore {
     var hotkeyModifiers: Int {
         get { ud.object(forKey: ns + "hotkeyModifiers") as? Int ?? Self.defaultHotkeyModifiers }
         set { ud.set(newValue, forKey: ns + "hotkeyModifiers") }
+    }
+    var inlineWarmUpEnabled: Bool {
+        get {
+            if ud.object(forKey: ns + "inlineWarmUpEnabled") == nil {
+                return Self.defaultInlineWarmUpEnabled
+            }
+            return ud.bool(forKey: ns + "inlineWarmUpEnabled")
+        }
+        set { ud.set(newValue, forKey: ns + "inlineWarmUpEnabled") }
     }
 
     var sidecarEndpoint: SidecarEndpoint {
@@ -127,7 +137,8 @@ final class SettingsStore {
          ns + "partialSilenceSecs", ns + "goldSilenceSecs", ns + "maxGoldSecs",
          ns + "minTranscribeSecs", ns + "minSpeechSecs",
          ns + "modelPath", ns + "tokensPath",
-         ns + "hotkeyKeyCode", ns + "hotkeyModifiers"].forEach { ud.removeObject(forKey: $0) }
+         ns + "hotkeyKeyCode", ns + "hotkeyModifiers",
+         ns + "inlineWarmUpEnabled"].forEach { ud.removeObject(forKey: $0) }
     }
 
     // MARK: - Config file
