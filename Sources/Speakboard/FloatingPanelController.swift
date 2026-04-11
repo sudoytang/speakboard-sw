@@ -14,6 +14,8 @@ enum PanelState {
 
 final class FloatingPanelController: NSObject {
 
+    private let settings: SettingsStore
+
     // Text written to the clipboard on Enter.  nil means no valid text to paste.
     var pasteText: String? = nil
 
@@ -44,16 +46,32 @@ final class FloatingPanelController: NSObject {
 
     // MARK: - Init
 
-    override init() {
+    init(settings: SettingsStore = .shared) {
+        self.settings = settings
         super.init()
         // Wire recorder's real-time chunks directly to the sidecar transport.
         // The closure is set once; it reads sidecar lazily at call time.
         recorder.onChunk = { [weak self] data in
             self?.sidecar?.sendAudioChunk(data)
         }
+        applySettings()
     }
 
     // MARK: - SidecarManager callbacks
+
+    /// Re-attach the panel's own callbacks on the shared sidecar.
+    /// Called by InlineDictationController after it finishes a session.
+    func reattachSidecarCallbacks() {
+        setupSidecarCallbacks()
+    }
+
+    func applySettings() {
+        if settings.inlineWarmUpEnabled {
+            recorder.warmUp()
+        } else if !recorder.isRecording {
+            recorder.coolDown()
+        }
+    }
 
     private func setupSidecarCallbacks() {
         sidecar?.onPartial = { [weak self] text in
@@ -92,7 +110,7 @@ final class FloatingPanelController: NSObject {
         pressTime = Date()
 
         // Discard any in-flight recording from a previous session.
-        recorder.stopRecording()
+        stopRecorderSession()
 
         if window.isVisible {
             centerOnMouseScreen()
@@ -146,7 +164,7 @@ final class FloatingPanelController: NSObject {
         state = .transcribing
         contentView?.enterTranscribingState()
 
-        recorder.stopRecording()      // stop sending chunks
+        stopRecorderSession()         // stop sending chunks
         sidecar?.sendStop()           // signal backend to flush and transcribe
         // handleFinalResult() will be called when the server responds.
     }
@@ -170,7 +188,7 @@ final class FloatingPanelController: NSObject {
     func hide() {
         holdWorkItem?.cancel()
         holdWorkItem = nil
-        recorder.stopRecording()
+        stopRecorderSession()
         switch state {
         case .recording:
             // Cancel the current sidecar session without triggering transcription.
@@ -234,6 +252,13 @@ final class FloatingPanelController: NSObject {
             contentView?.enterResultState(text: text, pasteable: true)
         } else {
             contentView?.enterResultState(text: errorMessage ?? "Transcription failed.", pasteable: false)
+        }
+    }
+
+    private func stopRecorderSession() {
+        recorder.stopRecording()
+        if !settings.inlineWarmUpEnabled {
+            recorder.coolDown()
         }
     }
 
