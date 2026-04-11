@@ -16,6 +16,8 @@ import AppKit
 
 final class InlineDictationController {
 
+    private let settings: SettingsStore
+
     // Injected by AppDelegate.
     weak var sidecar: SidecarManager?
     weak var panel: FloatingPanelController?
@@ -39,17 +41,25 @@ final class InlineDictationController {
 
     // MARK: - Init
 
-    init() {
+    init(settings: SettingsStore = .shared) {
+        self.settings = settings
         recorder.onChunk = { [weak self] data in
             self?.sidecar?.sendAudioChunk(data)
         }
-        // Pre-warm the audio engine so the first startRecording() is instant.
-        recorder.warmUp()
+        applySettings()
     }
 
     // MARK: - Public
 
     var isReady: Bool { sidecar?.isReady == true }
+
+    func applySettings() {
+        if settings.inlineWarmUpEnabled {
+            recorder.warmUp()
+        } else if !isActive {
+            recorder.coolDown()
+        }
+    }
 
     // MARK: Button event handlers (called by AppDelegate)
 
@@ -118,6 +128,9 @@ final class InlineDictationController {
         guard isActive else { return }
         cancelSilenceTimer()
         recorder.stopRecording()
+        if !settings.inlineWarmUpEnabled {
+            recorder.coolDown()
+        }
         sidecar?.sendStop()
         // finalize() is called asynchronously via onFinalResult.
     }
@@ -128,6 +141,9 @@ final class InlineDictationController {
         cancelSilenceTimer()
         isActive = false
         recorder.stopRecording()
+        if !settings.inlineWarmUpEnabled {
+            recorder.coolDown()
+        }
         sidecar?.cancelSession()
         if insertedCount > 0 {
             sendBackspaces(insertedCount)

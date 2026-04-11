@@ -51,6 +51,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 keyCode:   UInt32(SettingsStore.shared.hotkeyKeyCode),
                 modifiers: UInt32(SettingsStore.shared.hotkeyModifiers)
             )
+            self.panel.applySettings()
+            self.inlineDictation.applySettings()
         }
         statusBar.onSettings = { [weak self] in
             self?.settingsWindow.showSettings()

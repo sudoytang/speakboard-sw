@@ -74,6 +74,13 @@ final class AudioRecorder {
         }
     }
 
+    /// Tear down the warmed-up engine when low-latency startup is not needed.
+    func coolDown() {
+        guard !isRecording else { return }
+        teardownEngine()
+        audioChainDirty = true
+    }
+
     /// Request microphone permission if needed, then start capturing audio.
     func startRecording(completion: @escaping (Error?) -> Void) {
         guard !isRecording else { completion(nil); return }
