@@ -34,8 +34,6 @@ final class InlineDictationController {
 
     private let recorder  = AudioRecorder()
     private let highlight = HighlightOverlay()
-    /// Number of grapheme clusters currently typed at cursor (pending partial).
-    private var insertedCount = 0
     /// Silence auto-stop timer (only used in .autoStop mode).
     private var silenceTimer: DispatchWorkItem?
 
@@ -101,17 +99,18 @@ final class InlineDictationController {
         }
 
         isActive = true
-        insertedCount = 0
         highlight.show()
+        print("[inline] beginDictation: setting up yolo callbacks (onPartial=nil, onGoldUpdate=nil, onCommit=set)")
 
-        // Take over SidecarManager callbacks for inline mode.
-        sidecar.onPartial = { [weak self] text in
-            self?.updateInline(text)
-        }
-        sidecar.onGoldUpdate = { [weak self] text in
-            self?.updateInline(text)
+        // Take over SidecarManager callbacks for yolo (append-only) mode.
+        sidecar.onPartial = nil
+        sidecar.onGoldUpdate = nil
+        sidecar.onCommit = { [weak self] text in
+            print("[inline] onCommit received: \"\(text)\"")
+            self?.appendCommit(text)
         }
         sidecar.onFinalResult = { [weak self] text in
+            print("[inline] onFinalResult received: \"\(text ?? "(nil)")\"")
             self?.finalize(text)
         }
 
@@ -135,7 +134,9 @@ final class InlineDictationController {
         // finalize() is called asynchronously via onFinalResult.
     }
 
-    /// Cancel without producing a result; removes any partial text already typed.
+    /// Cancel without producing a result. Already committed text stays in place
+    /// (yolo mode is append-only — we cannot safely backspace committed text
+    /// because the user may have switched windows).
     func cancel() {
         guard isActive else { return }
         cancelSilenceTimer()
@@ -145,10 +146,6 @@ final class InlineDictationController {
             recorder.coolDown()
         }
         sidecar?.cancelSession()
-        if insertedCount > 0 {
-            sendBackspaces(insertedCount)
-            insertedCount = 0
-        }
         finish()
     }
 
@@ -167,28 +164,23 @@ final class InlineDictationController {
         silenceTimer = nil
     }
 
-    // MARK: - Private — text update
+    // MARK: - Private — text update (yolo / append-only)
 
-    private func updateInline(_ newText: String) {
+    /// Backend committed a completed utterance — just append it at the cursor.
+    private func appendCommit(_ text: String) {
         guard isActive else { return }
-        // Backend sent a speech update — reset the silence countdown.
         resetSilenceTimer()
-        let newCount = newText.count   // grapheme clusters == visual cursor positions
-        sendBackspaces(insertedCount)
-        if newCount > 0 { typeString(newText) }
-        insertedCount = newCount
+        typeString(text)
     }
 
+    /// Session ended. In yolo mode the backend flushes the last utterance as a
+    /// final commit, so `text` here is the full accumulated session text. We
+    /// don't need to retype it — individual commits already typed everything.
     private func finalize(_ text: String?) {
         cancelSilenceTimer()
         defer { if !isActive { panel?.reattachSidecarCallbacks() } }
         guard isActive else { return }
         isActive = false
-        sendBackspaces(insertedCount)
-        insertedCount = 0
-        if let text, !text.isEmpty {
-            typeString(text)
-        }
         finish()
     }
 
@@ -199,18 +191,6 @@ final class InlineDictationController {
     }
 
     // MARK: - Private — CGEvent helpers
-
-    /// Send `count` Delete (⌫) key events to the frontmost app.
-    private func sendBackspaces(_ count: Int) {
-        guard count > 0 else { return }
-        let src = CGEventSource(stateID: .combinedSessionState)
-        for _ in 0..<count {
-            let dn = CGEvent(keyboardEventSource: src, virtualKey: 51, keyDown: true)
-            let up = CGEvent(keyboardEventSource: src, virtualKey: 51, keyDown: false)
-            dn?.post(tap: .cgSessionEventTap)
-            up?.post(tap: .cgSessionEventTap)
-        }
-    }
 
     /// Type `text` at the current cursor position using a single Unicode keyboard event.
     private func typeString(_ text: String) {

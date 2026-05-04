@@ -31,18 +31,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         inlineDictation.onStateChange = { [weak self] active in
             self?.micButtonPanel.setRecording(active)
         }
-        micButtonPanel.show()
 
-        // Global hotkey: skip if inline dictation is currently active.
+        // Global hotkey (used for normal panel dictation).
         hotkey = GlobalHotkeyManager(
             keyCode:   UInt32(SettingsStore.shared.hotkeyKeyCode),
             modifiers: UInt32(SettingsStore.shared.hotkeyModifiers),
-            onPress:   { [weak self] in
-                guard !(self?.inlineDictation.isActive ?? false) else { return }
-                self?.panel.hotkeyPressed()
-            },
+            onPress:   { [weak self] in self?.panel.hotkeyPressed() },
             onRelease: { [weak self] in self?.panel.hotkeyReleased() }
         )
+
+        applyDictationMode()
 
         settingsWindow.onSaveRestart = { [weak self] in
             guard let self else { return }
@@ -53,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             self.panel.applySettings()
             self.inlineDictation.applySettings()
+            self.applyDictationMode()
         }
         statusBar.onSettings = { [weak self] in
             self?.settingsWindow.showSettings()
@@ -60,6 +59,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         sidecar.start()
         panel.sidecar = sidecar
+    }
+
+    /// Show/hide mic button and enable/disable hotkey based on the current setting.
+    private func applyDictationMode() {
+        let inline = SettingsStore.shared.inlineDictationEnabled
+        print("[app] applyDictationMode: inlineDictationEnabled=\(inline)")
+        if inline {
+            micButtonPanel.show()
+            hotkey.unregister()
+            print("[app]   → mic button shown, hotkey unregistered")
+        } else {
+            micButtonPanel.hide()
+            hotkey.update(
+                keyCode:   UInt32(SettingsStore.shared.hotkeyKeyCode),
+                modifiers: UInt32(SettingsStore.shared.hotkeyModifiers)
+            )
+            print("[app]   → mic button hidden, hotkey registered")
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

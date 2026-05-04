@@ -28,6 +28,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let minSpeechField     = SettingsWindowController.numberField()
     private let modelPathField     = SettingsWindowController.pathField()
     private let tokensPathField    = SettingsWindowController.pathField()
+    private let inlineDictationCheckbox = NSButton(checkboxWithTitle: "Enable inline dictation (floating mic button)", target: nil, action: nil)
     private let inlineWarmUpCheckbox = NSButton(checkboxWithTitle: "Keep microphone pre-warmed", target: nil, action: nil)
 
     // MARK: - Hotkey recorder state
@@ -139,16 +140,23 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         transportPopup.target = self
         transportPopup.action = #selector(transportChanged)
 
-        header("Hotkey")
-        let hotkeyLbl = NSTextField(labelWithString: "Global shortcut")
-        hotkeyLbl.alignment = .right
-        grid.addRow(with: [hotkeyLbl, hotkeyStack])
+        header("Dictation")
+        let inlineDictationLabel = NSTextField(labelWithString: "Input mode")
+        inlineDictationLabel.alignment = .right
+        inlineDictationCheckbox.setButtonType(.switch)
+        inlineDictationCheckbox.target = self
+        inlineDictationCheckbox.action = #selector(inlineDictationToggled)
+        grid.addRow(with: [inlineDictationLabel, inlineDictationCheckbox])
 
-        header("Microphone")
         let inlineWarmUpLabel = NSTextField(labelWithString: "Low-latency startup")
         inlineWarmUpLabel.alignment = .right
         inlineWarmUpCheckbox.setButtonType(.switch)
         grid.addRow(with: [inlineWarmUpLabel, inlineWarmUpCheckbox])
+
+        header("Hotkey")
+        let hotkeyLbl = NSTextField(labelWithString: "Global shortcut")
+        hotkeyLbl.alignment = .right
+        grid.addRow(with: [hotkeyLbl, hotkeyStack])
 
         header("Server")
         grid.addRow(with: [
@@ -230,7 +238,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         minSpeechField.stringValue     = format(settings.minSpeechSecs)
         modelPathField.stringValue     = settings.modelPath
         tokensPathField.stringValue    = settings.tokensPath
+        inlineDictationCheckbox.state  = settings.inlineDictationEnabled ? .on : .off
         inlineWarmUpCheckbox.state     = settings.inlineWarmUpEnabled ? .on : .off
+        updateInlineRelatedControls()
     }
 
     @objc private func saveAndRestart() {
@@ -256,6 +266,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         settings.minSpeechSecs         = Double(minSpeechField.stringValue)  ?? SettingsStore.defaultMinSpeechSecs
         settings.modelPath             = modelPathField.stringValue.trimmingCharacters(in: .whitespaces)
         settings.tokensPath            = tokensPathField.stringValue.trimmingCharacters(in: .whitespaces)
+        settings.inlineDictationEnabled = inlineDictationCheckbox.state == .on
         settings.inlineWarmUpEnabled   = inlineWarmUpCheckbox.state == .on
 
         do {
@@ -275,6 +286,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     @objc private func resetDefaults() {
         settings.resetToDefaults()
         loadValues()
+    }
+
+    @objc private func inlineDictationToggled() {
+        updateInlineRelatedControls()
     }
 
     @objc private func transportChanged() {
@@ -410,6 +425,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         case .loopbackTcp:
             endpointField.placeholderString = String(SettingsStore.defaultPort)
         }
+    }
+
+    private func updateInlineRelatedControls() {
+        let inline = inlineDictationCheckbox.state == .on
+        inlineWarmUpCheckbox.isEnabled = inline
+        hotkeyDisplayField.isEnabled = !inline
+        hotkeyRecordBtn.isEnabled = !inline
     }
 
     private static func numberField() -> NSTextField {

@@ -175,6 +175,7 @@ final class MicButtonPanel {
         panel.titleVisibility  = .hidden
         panel.titlebarAppearsTransparent = true
         panel.titlebarSeparatorStyle = .none
+        panel.isRestorable         = false
         panel.standardWindowButton(.closeButton)?.isHidden     = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden      = true

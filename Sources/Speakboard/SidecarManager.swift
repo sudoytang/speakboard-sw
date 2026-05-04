@@ -18,6 +18,8 @@ final class SidecarManager {
     var onPartial: ((String) -> Void)?
     /// Called whenever an accurate gold-boundary transcription arrives mid-recording (accumulated).
     var onGoldUpdate: ((String) -> Void)?
+    /// Called with append-only committed text in yolo mode.
+    var onCommit: ((String) -> Void)?
     /// Called with the final accumulated transcription after sendStop(), or nil if nothing detected.
     var onFinalResult: ((String?) -> Void)?
 
@@ -270,7 +272,14 @@ final class SidecarManager {
                 return
             }
             print("[sidecar] connected to \(transport.endpointDescription)")
-            self.sendText(#"{"type":"start"}"#)
+            let inline = self.settings.inlineDictationEnabled
+            if inline {
+                print("[sidecar] sending start with mode=yolo (inlineDictationEnabled=true)")
+                self.sendText(#"{"type":"start","mode":"yolo"}"#)
+            } else {
+                print("[sidecar] sending start without mode (inlineDictationEnabled=false)")
+                self.sendText(#"{"type":"start"}"#)
+            }
         }
         print("[sidecar] connecting to \(transport.endpointDescription)")
     }
@@ -295,6 +304,7 @@ final class SidecarManager {
             onReady?()
 
         case "partial":
+            print("[sidecar] received partial (onPartial \(onPartial == nil ? "nil" : "set"))")
             guard let t = json["text"] as? String, !t.isEmpty else { break }
             let pid = json["id"] as? String ?? "p0"
             if let idx = pendingPartials.firstIndex(where: { $0.id == pid }) {
@@ -308,6 +318,7 @@ final class SidecarManager {
             onPartial?(display)
 
         case "gold_replace":
+            print("[sidecar] received gold_replace (onGoldUpdate \(onGoldUpdate == nil ? "nil" : "set"))")
             guard let t = json["text"] as? String, !t.isEmpty else { break }
             pendingPartials = []   // gold replaces all pending partials
             sessionGoldText = sessionGoldText.isEmpty ? t : sessionGoldText + " " + t
@@ -317,6 +328,18 @@ final class SidecarManager {
                 onFinalResult?(sessionGoldText)
             } else {
                 onGoldUpdate?(sessionGoldText)
+            }
+
+        case "commit":
+            print("[sidecar] received commit (onCommit \(onCommit == nil ? "nil" : "set"))")
+            guard let t = json["text"] as? String, !t.isEmpty else { break }
+            sessionGoldText = sessionGoldText.isEmpty ? t : sessionGoldText + " " + t
+            if sessionStopped {
+                guard !finalResultDelivered else { break }
+                finalResultDelivered = true
+                onFinalResult?(sessionGoldText)
+            } else {
+                onCommit?(t)
             }
 
         default:
