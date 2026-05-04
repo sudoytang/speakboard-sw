@@ -98,6 +98,7 @@ final class SettingsStore {
 
     static let defaultHotkeyKeyCode: Int = 6       // kVK_ANSI_Z
     static let defaultHotkeyModifiers: Int = 4352  // cmdKey | controlKey
+    static let defaultInlineDictationEnabled = false
     static let defaultInlineWarmUpEnabled = true
 
     var hotkeyKeyCode: Int {
@@ -107,6 +108,15 @@ final class SettingsStore {
     var hotkeyModifiers: Int {
         get { ud.object(forKey: ns + "hotkeyModifiers") as? Int ?? Self.defaultHotkeyModifiers }
         set { ud.set(newValue, forKey: ns + "hotkeyModifiers") }
+    }
+    var inlineDictationEnabled: Bool {
+        get {
+            if ud.object(forKey: ns + "inlineDictationEnabled") == nil {
+                return Self.defaultInlineDictationEnabled
+            }
+            return ud.bool(forKey: ns + "inlineDictationEnabled")
+        }
+        set { ud.set(newValue, forKey: ns + "inlineDictationEnabled") }
     }
     var inlineWarmUpEnabled: Bool {
         get {
@@ -138,6 +148,7 @@ final class SettingsStore {
          ns + "minTranscribeSecs", ns + "minSpeechSecs",
          ns + "modelPath", ns + "tokensPath",
          ns + "hotkeyKeyCode", ns + "hotkeyModifiers",
+         ns + "inlineDictationEnabled",
          ns + "inlineWarmUpEnabled"].forEach { ud.removeObject(forKey: $0) }
     }
 

@@ -41,6 +41,11 @@ final class GlobalHotkeyManager {
         register(keyCode: keyCode, modifiers: modifiers)
     }
 
+    /// Unregister the hotkey so it stops firing.
+    func unregister() {
+        if let r = hotKeyRef { UnregisterEventHotKey(r); hotKeyRef = nil }
+    }
+
     // MARK: - Private
 
     private func installHandler() {
