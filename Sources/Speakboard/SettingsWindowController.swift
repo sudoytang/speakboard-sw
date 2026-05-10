@@ -31,6 +31,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let inlineDictationCheckbox = NSButton(checkboxWithTitle: "Enable inline dictation (floating mic button)", target: nil, action: nil)
     private let inlineWarmUpCheckbox = NSButton(checkboxWithTitle: "Keep microphone pre-warmed", target: nil, action: nil)
 
+    /// Separate drafts so switching transport never reinterprets the other mode's value.
+    private var draftSocketPath: String = ""
+    private var draftPort: String = ""
+
     // MARK: - Hotkey recorder state
 
     private let hotkeyDisplayField: NSTextField = {
@@ -222,11 +226,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         if let idx = BackendTransportKind.allCases.firstIndex(of: settings.transportKind) {
             transportPopup.selectItem(at: idx)
         }
-        switch settings.sidecarEndpoint {
-        case .unix(let path):
-            endpointField.stringValue = path
-        case .loopbackTcp(_, let port):
-            endpointField.stringValue = "\(port)"
+        draftSocketPath = settings.socketPath
+        draftPort = String(settings.port)
+        switch settings.transportKind {
+        case .unixDomainSocket:
+            endpointField.stringValue = draftSocketPath
+        case .loopbackTcp:
+            endpointField.stringValue = draftPort
         }
         applyEndpointFieldStyle()
         threadsField.stringValue       = "\(settings.numThreads)"
@@ -253,9 +259,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let endpointValue = endpointField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         switch settings.transportKind {
         case .unixDomainSocket:
-            settings.socketPath = endpointValue.isEmpty ? SettingsStore.defaultSocketPath : endpointValue
+            if !endpointValue.isEmpty { draftSocketPath = endpointValue }
+            settings.socketPath = draftSocketPath.isEmpty ? SettingsStore.defaultSocketPath : draftSocketPath
         case .loopbackTcp:
-            settings.port = Int(endpointValue) ?? SettingsStore.defaultPort
+            if !endpointValue.isEmpty { draftPort = endpointValue }
+            if let port = Int(draftPort), port > 0, port <= Int(UInt16.max) {
+                settings.port = port
+            } else {
+                settings.port = SettingsStore.defaultPort
+            }
         }
         settings.numThreads            = Int(threadsField.stringValue)       ?? SettingsStore.defaultNumThreads
         settings.silenceRmsThreshold   = Double(silenceRmsField.stringValue) ?? SettingsStore.defaultSilenceRmsThreshold
@@ -294,8 +306,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func transportChanged() {
         let trimmed = endpointField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            endpointField.stringValue = defaultEndpointValue(for: selectedTransportKind())
+        let newKind = selectedTransportKind()
+        // Stash the current field text into the old transport's draft,
+        // then restore the new transport's draft into the field.
+        switch newKind {
+        case .unixDomainSocket:
+            if !trimmed.isEmpty { draftPort = trimmed }
+            endpointField.stringValue = draftSocketPath
+        case .loopbackTcp:
+            if !trimmed.isEmpty { draftSocketPath = trimmed }
+            endpointField.stringValue = draftPort
         }
         applyEndpointFieldStyle()
     }
@@ -407,15 +427,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private func selectedTransportKind() -> BackendTransportKind {
         let idx = max(0, transportPopup.indexOfSelectedItem)
         return BackendTransportKind.allCases[idx]
-    }
-
-    private func defaultEndpointValue(for kind: BackendTransportKind) -> String {
-        switch kind {
-        case .unixDomainSocket:
-            return SettingsStore.defaultSocketPath
-        case .loopbackTcp:
-            return String(SettingsStore.defaultPort)
-        }
     }
 
     private func applyEndpointFieldStyle() {
