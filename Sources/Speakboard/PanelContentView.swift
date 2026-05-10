@@ -75,7 +75,10 @@ final class PanelContentView: NSView {
         case .recording(.shortPress):
             hintLabel.stringValue = "↩  stop recording     Esc  cancel"
         case .recording(.longPress):
-            hintLabel.stringValue = "release ⌘⇧O  to stop     Esc  cancel"
+            let hotkey = SettingsWindowController.hotkeyDisplayString(
+                keyCode: UInt32(SettingsStore.shared.hotkeyKeyCode),
+                modifiers: UInt32(SettingsStore.shared.hotkeyModifiers))
+            hintLabel.stringValue = "release \(hotkey)  to stop     Esc  cancel"
         case .transcribing:
             hintLabel.stringValue = "Transcribing…"
         case .result:
