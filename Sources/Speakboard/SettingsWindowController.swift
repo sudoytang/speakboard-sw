@@ -99,6 +99,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             lbl.font = .systemFont(ofSize: 11, weight: .semibold)
             lbl.textColor = .secondaryLabelColor
             let row = grid.addRow(with: [lbl, NSGridCell.emptyContentView])
+            row.mergeCells(in: NSRange(location: 0, length: 2))
+            row.cell(at: 0).xPlacement = .leading
             row.topPadding = 12
             return row
         }
@@ -436,6 +438,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         case .loopbackTcp:
             endpointField.placeholderString = String(SettingsStore.defaultPort)
         }
+        endpointField.toolTip = endpointField.stringValue.isEmpty ? nil : endpointField.stringValue
     }
 
     private func updateInlineRelatedControls() {
