@@ -99,7 +99,7 @@ final class SettingsStore {
     static let defaultHotkeyKeyCode: Int = 6       // kVK_ANSI_Z
     static let defaultHotkeyModifiers: Int = 4352  // cmdKey | controlKey
     static let defaultInlineDictationEnabled = false
-    static let defaultInlineWarmUpEnabled = true
+    static let defaultInlineWarmUpEnabled = false
 
     var hotkeyKeyCode: Int {
         get { ud.object(forKey: ns + "hotkeyKeyCode") as? Int ?? Self.defaultHotkeyKeyCode }
